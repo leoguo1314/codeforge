@@ -1,6 +1,21 @@
 const ANDROID_SHARE_EVENT = "codeforge:android-share";
 
+export const ANDROID_SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
+
 export type AndroidNotificationKind = "approval" | "complete" | "input" | "info";
+
+export type AndroidSharedPayload =
+  | {
+      kind: "text";
+      text: string;
+    }
+  | {
+      kind: "image";
+      name: string;
+      mimeType: string;
+      dataUrl: string;
+      text?: string;
+    };
 
 type AndroidJavascriptBridge = {
   notify?: (kind: AndroidNotificationKind, title: string, body: string) => void;
@@ -9,7 +24,7 @@ type AndroidJavascriptBridge = {
 declare global {
   interface Window {
     CodeForgeAndroid?: AndroidJavascriptBridge;
-    __codeforgePendingAndroidSharedText?: string[];
+    __codeforgePendingAndroidShares?: AndroidSharedPayload[];
     __codeforgeReceiveSharedText?: (text: string) => void;
   }
 }
@@ -18,6 +33,40 @@ function normalizeSharedText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const text = value.trim();
   return text.length > 0 ? text : null;
+}
+
+function parseAndroidShare(rawValue: unknown): AndroidSharedPayload | null {
+  const rawText = normalizeSharedText(rawValue);
+  if (!rawText) return null;
+
+  if (!rawText.startsWith(ANDROID_SHARE_PREFIX)) {
+    return { kind: "text", text: rawText };
+  }
+
+  try {
+    const parsed = JSON.parse(rawText.slice(ANDROID_SHARE_PREFIX.length)) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const record = parsed as Record<string, unknown>;
+    if (record.kind !== "image") return null;
+
+    const name = normalizeSharedText(record.name);
+    const mimeType = normalizeSharedText(record.mimeType);
+    const dataUrl = normalizeSharedText(record.dataUrl);
+    const text = normalizeSharedText(record.text);
+    if (!name || !mimeType?.startsWith("image/") || !dataUrl?.startsWith("data:image/")) {
+      return null;
+    }
+
+    return {
+      kind: "image",
+      name,
+      mimeType,
+      dataUrl,
+      ...(text ? { text } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function isAndroidApp(): boolean {
@@ -31,30 +80,31 @@ export function installAndroidBridge(): void {
     document.documentElement.classList.add("codeforge-android");
   }
 
-  window.__codeforgePendingAndroidSharedText ??= [];
+  window.__codeforgePendingAndroidShares ??= [];
   window.__codeforgeReceiveSharedText = (rawText: string) => {
-    const text = normalizeSharedText(rawText);
-    if (!text) return;
+    const payload = parseAndroidShare(rawText);
+    if (!payload) return;
 
-    window.__codeforgePendingAndroidSharedText?.push(text);
-    window.dispatchEvent(new CustomEvent<string>(ANDROID_SHARE_EVENT, { detail: text }));
+    window.__codeforgePendingAndroidShares?.push(payload);
+    window.dispatchEvent(new CustomEvent<AndroidSharedPayload>(ANDROID_SHARE_EVENT, { detail: payload }));
   };
 }
 
-export function consumePendingAndroidSharedText(): string[] {
+export function consumePendingAndroidShares(): AndroidSharedPayload[] {
   if (typeof window === "undefined") return [];
-  const pending = window.__codeforgePendingAndroidSharedText ?? [];
-  window.__codeforgePendingAndroidSharedText = [];
+  const pending = window.__codeforgePendingAndroidShares ?? [];
+  window.__codeforgePendingAndroidShares = [];
   return pending;
 }
 
-export function onAndroidSharedText(listener: (text: string) => void): () => void {
+export function onAndroidShare(listener: (payload: AndroidSharedPayload) => void): () => void {
   if (typeof window === "undefined") return () => undefined;
 
   const handler = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
-    const text = normalizeSharedText(event.detail);
-    if (text) listener(text);
+    const payload = event.detail as AndroidSharedPayload | undefined;
+    if (!payload || (payload.kind !== "text" && payload.kind !== "image")) return;
+    listener(payload);
   };
 
   window.addEventListener(ANDROID_SHARE_EVENT, handler);
