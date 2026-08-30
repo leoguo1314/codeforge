@@ -77,7 +77,19 @@ Android supports a credential-bearing pairing URI:
 codeforge://connect?server=<URL_ENCODED_SERVER>&token=<URL_ENCODED_TOKEN>
 ```
 
-v0.3 adds a first-class **Pair Android** launcher to the CodeForge web/desktop workspace. The dialog pre-fills the current HTTP(S) origin when possible, accepts the `--auth-token` value, generates the pairing link entirely in the browser, and lets you copy it without sending the credential to a third-party service.
+The CodeForge web/desktop workspace includes a first-class **Pair Android** dialog. It pre-fills the current HTTP(S) origin when possible, accepts the `--auth-token` value, generates the pairing link in the browser, and in v0.4 renders a scannable QR locally with a dependency-free QR Model 2 encoder.
+
+```text
+CodeForge web / desktop
+        |
+        | local QR render only
+        v
+Android camera / QR scanner
+        |
+        | codeforge://connect?...token=...
+        v
+CodeForge Android connection profile
+```
 
 Example for a debug LAN server:
 
@@ -85,17 +97,15 @@ Example for a debug LAN server:
 codeforge://connect?server=http%3A%2F%2F192.168.1.20%3A3020&token=REPLACE_WITH_TOKEN
 ```
 
-Open the link on Android and CodeForge stores the connection profile and connects immediately.
+Open or scan the link on Android and CodeForge stores the connection profile and connects immediately.
 
-**Treat the pairing link as a credential when it contains a token.** Do not publish, log, paste into public QR generators, or share it in chat rooms. v0.3 intentionally does not call an external QR service. A future increment should add an offline/local QR renderer, then replace long-lived token-bearing links with short-lived, single-use pairing codes issued by the server.
+**Treat the pairing QR/link as a credential when it contains a token.** Do not publish, log, upload, or share it. The QR is generated entirely inside CodeForge; no external QR endpoint or analytics service receives the server address or token. A later production pairing flow should replace long-lived token-bearing links with short-lived, single-use pairing codes issued by the server.
 
 ## Android share target
 
-CodeForge appears in Android's share sheet for text/URLs and images.
+CodeForge appears in Android's share sheet for text/URLs and images. Shared material is inserted into the current Composer draft and is never auto-sent or auto-executed.
 
 ### Text and URL share
-
-Sharing `text/*` into CodeForge appends the content to the current thread's Composer draft. It does **not** auto-send or execute anything.
 
 ```text
 Browser / Notes / GitHub app
@@ -109,32 +119,45 @@ CodeForge current Composer draft
 Remote Coding Agent
 ```
 
-### Image share
+### Single and multi-image share
 
-v0.3 adds a dedicated Android image share receiver for `image/*`.
+v0.4 accepts both `ACTION_SEND` and `ACTION_SEND_MULTIPLE` for `image/*` and supports up to four images in one Android share event.
 
 ```text
 Gallery / Screenshot / Files
           |
-          | Android Share
+          | Android Share (1..4 images)
           v
 ShareReceiverActivity
-  |- decode with bounded sampling
-  |- resize to a mobile-safe edge
-  |- JPEG-compress to a Binder-safe payload
+  |- bounded image decode
+  |- mobile-safe resize
+  |- JPEG compression
+  |- multi-image Binder budget
           |
           v
-CodeForge Web bridge
+CodeForge typed Web bridge
           |
           v
-Native ComposerImageAttachment
+Native ComposerImageAttachment[]
           |
        user sends
 ```
 
-The shared image becomes a normal CodeForge Composer image attachment, so existing preview, attachment-count, size-limit, draft-persistence, and send-turn behavior is reused instead of creating a separate upload protocol. If the source app also supplies share text/caption, it is appended to the Composer draft.
+Single images target a larger per-image payload budget. Multi-image shares use a smaller per-image budget so the combined Intent/WebView payload remains below practical Binder transaction limits. Existing CodeForge preview, attachment-count, image-size, draft-persistence, and send-turn behavior is reused instead of introducing a separate upload protocol.
 
-v0.3 intentionally supports **one image per Android share intent**. Multi-image `ACTION_SEND_MULTIPLE` and generic non-image binary files are not implemented yet. CodeForge's current Composer transport is image-oriented, so generic file share requires a separate product/transport design rather than pretending arbitrary files are already supported.
+If the source app supplies a caption it is appended to the Composer draft once. If the current Composer does not have enough attachment slots for the entire multi-image share, CodeForge rejects that share with an explicit message instead of silently dropping images.
+
+Generic non-image binary files are still not mapped into the image-only Composer transport. They need an explicit document/file attachment product contract rather than being disguised as images.
+
+## Camera → Composer
+
+v0.4 adds **Camera → Composer** to the Android overflow menu. It launches the system camera app and places the returned preview image into the current Composer through the same bounded image payload path used by Android Share.
+
+This first camera increment intentionally uses the camera app's returned preview bitmap, which avoids storage permissions and temporary-file provider complexity. It is useful for quick photos of screens, whiteboards, devices, and error states, but it is not yet a full-resolution camera capture. A later increment can add a private full-resolution capture URI/FileProvider path.
+
+## Share delivery reliability
+
+Native-to-Web share delivery uses a FIFO queue. Text, image, multi-image, and camera payloads are delivered one event at a time and removed from the queue only after the CodeForge page confirms that its Android bridge accepted the event. This avoids corrupting structured payload boundaries when several Android intents arrive before the WebView is ready.
 
 ## Agent notifications
 
@@ -157,11 +180,12 @@ This Android version is intended for a private workstation/server connection, no
 - Debug APKs allow HTTP so a phone can connect directly to a development machine on the LAN.
 - Provider credentials remain on the CodeForge Server host; they are not copied to Android.
 - External links are handed to Android instead of being navigated inside the CodeForge WebView.
-- The native JavaScript bridge exposes only a small notification method. Share delivery is initiated by native code into the CodeForge page; there is no generic native command executor.
-- Android image shares are downscaled/compressed before being placed in an Intent/WebView payload to stay below practical Binder transfer limits.
-- Shared text/images are inserted into the Composer as drafts and never auto-executed.
-- The WebView does not navigate arbitrary external origins, which limits bridge exposure to the configured CodeForge server content.
-- Pairing-link generation stays local and does not call an external QR/pairing service.
+- The native JavaScript bridge exposes only a small notification method; it is not a generic native command executor.
+- Android images are downscaled/compressed before entering Intent/WebView payloads.
+- Multi-image shares are capped at four images and use a tighter per-image byte budget.
+- Shared text/images/camera captures are inserted into the Composer as drafts and never auto-executed.
+- The WebView does not navigate arbitrary external origins, which limits bridge exposure to configured CodeForge server content.
+- Pairing-link and QR generation stays local and does not call an external pairing/QR service.
 
 The server currently serves static UI/attachment HTTP routes separately from WebSocket auth. For Internet-facing deployment, put the entire endpoint behind TLS and an authenticated private network/reverse proxy rather than relying on the WebSocket token alone.
 
@@ -181,18 +205,19 @@ Because the Android client reuses the existing server and web application, it ca
 - image attachment selection from Android
 - thread history, diffs, checkpoints, and search
 - Android text/URL share target
-- Android single-image share into the native Composer attachment model
+- Android single-image and up-to-four-image share into the native Composer attachment model
+- Camera → Composer quick capture
+- FIFO native share delivery
 - Android local notifications for approval/input/completion transitions
 - `codeforge://connect` quick-pairing links
-- web/desktop Pair Android dialog with local pairing-link generation
+- web/desktop Pair Android dialog with built-in offline QR rendering
 
 ## Next Android increments
 
-1. Add an offline/local QR renderer inside the Pair Android dialog.
-2. Add `ACTION_SEND_MULTIPLE` for multi-image share and evaluate explicit text/document ingestion separately from image attachments.
-3. Add camera capture and a richer attachment picker.
-4. Improve mobile-specific Chat/Header/Terminal interaction density and touch targets.
-5. Add foreground/background connection lifecycle and reconnection status UI.
-6. Add reliable server-driven push notifications for long-running turns.
-7. Replace token-bearing pairing links with single-use, short-lived device pairing codes.
-8. Strengthen server-side HTTP/session authentication for non-private-network deployments.
+1. Add full-resolution private camera capture instead of relying only on the camera preview bitmap.
+2. Improve mobile-specific Chat/Header/Terminal interaction density and touch targets.
+3. Add foreground/background connection lifecycle and explicit reconnect/offline status UI.
+4. Add reliable server-driven push notifications for long-running turns.
+5. Replace token-bearing pairing links with single-use, short-lived device pairing codes.
+6. Design a first-class generic file/document attachment contract rather than overloading image attachments.
+7. Strengthen server-side HTTP/session authentication for non-private-network deployments.
