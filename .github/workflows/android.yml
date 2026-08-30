@@ -6,6 +6,7 @@ on:
       - "apps/android/**"
       - "apps/web/src/androidBridge.ts"
       - "apps/web/src/androidBridge.test.ts"
+      - "apps/web/src/components/AndroidDeviceRegistration.tsx"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/lib/qrCode.ts"
@@ -17,10 +18,17 @@ on:
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
+      - "apps/server/src/mobile/**"
+      - "apps/server/src/persistence/Migrations.ts"
+      - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
+      - "apps/server/src/serverLayers.ts"
+      - "apps/server/src/wsServer.ts"
       - "apps/server/src/wsServer/pushBus.ts"
       - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
       - "apps/server/src/wsServer/mobileNotifications.test.ts"
+      - "packages/contracts/src/ipc.ts"
+      - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
       - ".github/workflows/android.yml"
   pull_request:
@@ -28,6 +36,7 @@ on:
       - "apps/android/**"
       - "apps/web/src/androidBridge.ts"
       - "apps/web/src/androidBridge.test.ts"
+      - "apps/web/src/components/AndroidDeviceRegistration.tsx"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/lib/qrCode.ts"
@@ -39,10 +48,17 @@ on:
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
+      - "apps/server/src/mobile/**"
+      - "apps/server/src/persistence/Migrations.ts"
+      - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
+      - "apps/server/src/serverLayers.ts"
+      - "apps/server/src/wsServer.ts"
       - "apps/server/src/wsServer/pushBus.ts"
       - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
       - "apps/server/src/wsServer/mobileNotifications.test.ts"
+      - "packages/contracts/src/ipc.ts"
+      - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
       - ".github/workflows/android.yml"
 
@@ -73,8 +89,8 @@ jobs:
       - name: Typecheck shared contracts
         run: bun run --cwd packages/contracts typecheck
 
-      - name: Test mobile server notification and push bus
-        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts
+      - name: Test mobile server notification, push bus, and delivery wiring
+        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts
 
   build-debug-apk:
     runs-on: ubuntu-latest
