@@ -4,7 +4,7 @@ import { createQrMatrix, qrMatrixToPath } from "./qrCode";
 
 describe("offline pairing QR encoder", () => {
   it("creates a square version-1 matrix for a short byte payload", () => {
-    const matrix = createQrMatrix("codeforge://connect");
+    const matrix = createQrMatrix("pair-me");
     expect(matrix.length).toBe(21);
     expect(matrix.every((row) => row.length === 21)).toBe(true);
 
