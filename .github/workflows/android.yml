@@ -16,6 +16,10 @@ on:
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
+      - "apps/server/src/wsServer/pushBus.ts"
+      - "apps/server/src/wsServer/mobileNotifications.ts"
+      - "apps/server/src/wsServer/mobileNotifications.test.ts"
+      - "packages/contracts/src/ws.ts"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
@@ -32,6 +36,10 @@ on:
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
+      - "apps/server/src/wsServer/pushBus.ts"
+      - "apps/server/src/wsServer/mobileNotifications.ts"
+      - "apps/server/src/wsServer/mobileNotifications.test.ts"
+      - "packages/contracts/src/ws.ts"
       - ".github/workflows/android.yml"
 
 permissions:
@@ -57,6 +65,12 @@ jobs:
 
       - name: Typecheck web
         run: bun run --cwd apps/web typecheck
+
+      - name: Test mobile server notification contract
+        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts
+
+      - name: Typecheck server
+        run: bun run --cwd apps/server typecheck
 
   build-debug-apk:
     runs-on: ubuntu-latest
