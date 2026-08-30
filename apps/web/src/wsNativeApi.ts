@@ -223,6 +223,13 @@ export function createWsNativeApi(): NativeApi {
         return showContextMenuFallback(items, position);
       },
     },
+    mobile: {
+      registerDevice: (input) => transport.request(WS_METHODS.mobileRegisterDevice, input),
+      unregisterDevice: (input) => transport.request(WS_METHODS.mobileUnregisterDevice, input),
+      getPushStatus: (input) => transport.request(WS_METHODS.mobileGetPushStatus, input),
+      sendTestNotification: (input) =>
+        transport.request(WS_METHODS.mobileSendTestNotification, input),
+    },
     server: {
       getConfig: () => transport.request(WS_METHODS.serverGetConfig),
       refreshProviders: () => transport.request(WS_METHODS.serverRefreshProviders),
