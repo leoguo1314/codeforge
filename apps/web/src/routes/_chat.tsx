@@ -4,6 +4,7 @@ import { Outlet, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import ThreadSidebar from "../components/Sidebar";
+import { PairAndroidLauncher } from "../components/PairAndroidLauncher";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
@@ -130,6 +131,7 @@ function ChatRouteLayout() {
         <SidebarRail />
       </Sidebar>
       <Outlet />
+      <PairAndroidLauncher />
     </SidebarProvider>
   );
 }
