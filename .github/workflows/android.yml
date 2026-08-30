@@ -18,6 +18,26 @@ permissions:
   contents: read
 
 jobs:
+  web-transport:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test WebSocket transport
+        run: bun run --cwd apps/web test -- src/wsTransport.test.ts
+
+      - name: Typecheck web
+        run: bun run --cwd apps/web typecheck
+
   build-debug-apk:
     runs-on: ubuntu-latest
     steps:
