@@ -9,11 +9,11 @@ describe("offline pairing QR encoder", () => {
     expect(matrix.every((row) => row.length === 21)).toBe(true);
 
     // Finder-pattern anchors remain present in all three required corners.
-    expect(matrix[0][0]).toBe(true);
-    expect(matrix[0][6]).toBe(true);
-    expect(matrix[6][0]).toBe(true);
-    expect(matrix[0][20]).toBe(true);
-    expect(matrix[20][0]).toBe(true);
+    expect(matrix[0]?.[0]).toBe(true);
+    expect(matrix[0]?.[6]).toBe(true);
+    expect(matrix[6]?.[0]).toBe(true);
+    expect(matrix[0]?.[20]).toBe(true);
+    expect(matrix[20]?.[0]).toBe(true);
   });
 
   it("selects a larger QR version for credential-bearing pairing links", () => {
