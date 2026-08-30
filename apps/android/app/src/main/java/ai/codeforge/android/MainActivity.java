@@ -10,10 +10,12 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -39,6 +41,7 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.util.ArrayDeque;
 import java.util.Locale;
 
 /**
@@ -46,21 +49,25 @@ import java.util.Locale;
  *
  * Agent runtimes, Git, Terminal, Skills, persistence, and orchestration stay on
  * the remote CodeForge Server. Android supplies the mobile shell, secure remote
- * connection profile, native shares, pairing deep links, file selection, and
- * background notifications.
+ * connection profile, native shares, pairing deep links, image selection,
+ * quick camera capture, and background notifications.
  */
 public final class MainActivity extends Activity {
     private static final String PREFS = "codeforge_android";
     private static final String PREF_SERVER_URL = "server_url";
     private static final String PREF_AUTH_TOKEN = "auth_token";
     private static final String NOTIFICATION_CHANNEL_ID = "codeforge_agent_events";
+    private static final String SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
 
     private static final int FILE_CHOOSER_REQUEST = 7001;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 7002;
+    private static final int CAMERA_CAPTURE_REQUEST = 7003;
+    private static final int CAMERA_TARGET_BYTES = 220 * 1024;
 
-    private static final int MENU_RELOAD = 1;
-    private static final int MENU_CHANGE_CONNECTION = 2;
-    private static final int MENU_DISCONNECT = 3;
+    private static final int MENU_CAMERA = 1;
+    private static final int MENU_RELOAD = 2;
+    private static final int MENU_CHANGE_CONNECTION = 3;
+    private static final int MENU_DISCONNECT = 4;
 
     private SharedPreferences preferences;
     private FrameLayout contentContainer;
@@ -69,7 +76,7 @@ public final class MainActivity extends Activity {
     private ValueCallback<Uri[]> pendingFileChooser;
     private String currentServerUrl;
     private String currentAuthToken;
-    private String pendingSharedText;
+    private final ArrayDeque<String> pendingShares = new ArrayDeque<>();
     private boolean foreground;
 
     @Override
@@ -109,7 +116,7 @@ public final class MainActivity extends Activity {
         }
 
         if (enqueueIncomingShare(intent)) {
-            dispatchPendingSharedText();
+            dispatchPendingShares();
         }
     }
 
@@ -177,10 +184,15 @@ public final class MainActivity extends Activity {
 
     private void showServerMenu(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
-        menu.getMenu().add(0, MENU_RELOAD, 0, "Reload");
-        menu.getMenu().add(0, MENU_CHANGE_CONNECTION, 1, "Connection");
-        menu.getMenu().add(0, MENU_DISCONNECT, 2, "Disconnect");
+        menu.getMenu().add(0, MENU_CAMERA, 0, "Camera → Composer");
+        menu.getMenu().add(0, MENU_RELOAD, 1, "Reload");
+        menu.getMenu().add(0, MENU_CHANGE_CONNECTION, 2, "Connection");
+        menu.getMenu().add(0, MENU_DISCONNECT, 3, "Disconnect");
         menu.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == MENU_CAMERA) {
+                launchCameraCapture();
+                return true;
+            }
             if (item.getItemId() == MENU_RELOAD) {
                 if (webView != null) {
                     webView.reload();
@@ -201,6 +213,21 @@ public final class MainActivity extends Activity {
             return false;
         });
         menu.show();
+    }
+
+    private void launchCameraCapture() {
+        if (webView == null || webView.getParent() == null) {
+            Toast.makeText(this, "Connect to CodeForge before taking a photo.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            startActivityForResult(
+                new Intent(MediaStore.ACTION_IMAGE_CAPTURE),
+                CAMERA_CAPTURE_REQUEST
+            );
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "No camera app is available.", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void showConnectionForm(String errorMessage) {
@@ -407,7 +434,7 @@ public final class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSafeBrowsingEnabled(true);
-        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.2");
+        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.4");
         CookieManager.getInstance().setAcceptCookie(true);
 
         view.addJavascriptInterface(new AndroidJavascriptBridge(), "CodeForgeAndroid");
@@ -429,7 +456,7 @@ public final class MainActivity extends Activity {
                     "document.documentElement.classList.add('codeforge-android'); true;",
                     null
                 );
-                dispatchPendingSharedText();
+                dispatchPendingShares();
             }
         });
 
@@ -471,30 +498,47 @@ public final class MainActivity extends Activity {
         if (text.isEmpty()) {
             return false;
         }
-        pendingSharedText = TextUtils.isEmpty(pendingSharedText)
-            ? text
-            : pendingSharedText + "\n\n" + text;
+        pendingShares.addLast(text);
         return true;
     }
 
-    private void dispatchPendingSharedText() {
-        if (webView == null || TextUtils.isEmpty(pendingSharedText)) {
+    private void enqueueCameraBitmap(Bitmap bitmap) {
+        try {
+            JSONObject payload = AndroidImagePayload.fromBitmap(
+                bitmap,
+                "camera-" + System.currentTimeMillis() + ".jpg",
+                CAMERA_TARGET_BYTES
+            );
+            payload.put("kind", "image");
+            pendingShares.addLast(SHARE_PREFIX + payload.toString());
+            dispatchPendingShares();
+        } catch (Exception error) {
+            Toast.makeText(this, "CodeForge could not prepare the camera image.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void dispatchPendingShares() {
+        if (webView == null || pendingShares.isEmpty()) {
             return;
         }
-        String textToDispatch = pendingSharedText;
+        String shareToDispatch = pendingShares.peekFirst();
+        if (shareToDispatch == null) {
+            return;
+        }
         String javascript =
             "(() => {" +
             " if (typeof window.__codeforgeReceiveSharedText !== 'function') return false;" +
-            " window.__codeforgeReceiveSharedText(" + JSONObject.quote(textToDispatch) + ");" +
+            " window.__codeforgeReceiveSharedText(" + JSONObject.quote(shareToDispatch) + ");" +
             " return true;" +
             "})()";
         webView.evaluateJavascript(javascript, result -> {
-            if ("true".equals(result) && TextUtils.equals(pendingSharedText, textToDispatch)) {
-                pendingSharedText = null;
+            if ("true".equals(result) && TextUtils.equals(pendingShares.peekFirst(), shareToDispatch)) {
+                pendingShares.pollFirst();
+                dispatchPendingShares();
                 return;
             }
-            if (!TextUtils.isEmpty(pendingSharedText) && webView != null) {
-                webView.postDelayed(this::dispatchPendingSharedText, 300);
+            if (!pendingShares.isEmpty() && webView != null) {
+                webView.postDelayed(this::dispatchPendingShares, 300);
             }
         });
     }
@@ -623,9 +667,34 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private Bitmap cameraBitmapFromResult(Intent data) {
+        if (data == null || data.getExtras() == null) {
+            return null;
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            return data.getExtras().getParcelable("data", Bitmap.class);
+        }
+        Object value = data.getExtras().get("data");
+        return value instanceof Bitmap ? (Bitmap) value : null;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == CAMERA_CAPTURE_REQUEST) {
+            if (resultCode == RESULT_OK) {
+                Bitmap bitmap = cameraBitmapFromResult(data);
+                if (bitmap != null) {
+                    enqueueCameraBitmap(bitmap);
+                } else {
+                    Toast.makeText(this, "Camera did not return an image.", Toast.LENGTH_SHORT).show();
+                }
+            }
+            return;
+        }
+
         if (requestCode != FILE_CHOOSER_REQUEST || pendingFileChooser == null) {
             return;
         }
