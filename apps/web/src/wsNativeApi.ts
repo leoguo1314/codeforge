@@ -11,6 +11,7 @@ import {
   type WsWelcomePayload,
 } from "@codeforge/contracts";
 
+import { notifyAndroid } from "./androidBridge";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { WsTransport } from "./wsTransport";
 
@@ -130,6 +131,10 @@ export function createWsNativeApi(): NativeApi {
         // Swallow listener errors
       }
     }
+  });
+  transport.subscribe(WS_CHANNELS.mobileNotification, (message) => {
+    const payload = message.data;
+    notifyAndroid(payload.kind, payload.title, payload.body);
   });
 
   const api: NativeApi = {
