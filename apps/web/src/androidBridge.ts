@@ -1,3 +1,5 @@
+import { WS_TRANSPORT_STATE_EVENT, type TransportState } from "./wsTransport";
+
 const ANDROID_SHARE_EVENT = "codeforge:android-share";
 
 export const ANDROID_SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
@@ -24,6 +26,7 @@ export type AndroidSharedPayload =
 
 type AndroidJavascriptBridge = {
   notify?: (kind: AndroidNotificationKind, title: string, body: string) => void;
+  connectionState?: (state: TransportState) => void;
 };
 
 declare global {
@@ -112,6 +115,17 @@ export function installAndroidBridge(): void {
     window.__codeforgePendingAndroidShares?.push(payload);
     window.dispatchEvent(new CustomEvent<AndroidSharedPayload>(ANDROID_SHARE_EVENT, { detail: payload }));
   };
+
+  window.addEventListener(WS_TRANSPORT_STATE_EVENT, (event) => {
+    if (!(event instanceof CustomEvent)) return;
+    const state = event.detail as TransportState | undefined;
+    if (!state || !isAndroidApp()) return;
+    try {
+      window.CodeForgeAndroid?.connectionState?.(state);
+    } catch {
+      // Native shell status is best-effort and must never affect transport.
+    }
+  });
 }
 
 export function consumePendingAndroidShares(): AndroidSharedPayload[] {
