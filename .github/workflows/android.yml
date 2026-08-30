@@ -15,6 +15,7 @@ on:
       - "apps/web/src/main.tsx"
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
+      - "apps/web/src/wsTransport.mobile.test.ts"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
@@ -30,6 +31,7 @@ on:
       - "apps/web/src/main.tsx"
       - "apps/web/src/wsTransport.ts"
       - "apps/web/src/wsTransport.test.ts"
+      - "apps/web/src/wsTransport.mobile.test.ts"
       - ".github/workflows/android.yml"
 
 permissions:
@@ -51,7 +53,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test Android web integration
-        run: bun run --cwd apps/web test -- src/wsTransport.test.ts src/androidBridge.test.ts src/lib/qrCode.test.ts
+        run: bun run --cwd apps/web test -- src/wsTransport.test.ts src/wsTransport.mobile.test.ts src/androidBridge.test.ts src/lib/qrCode.test.ts
 
       - name: Typecheck web
         run: bun run --cwd apps/web typecheck
