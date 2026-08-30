@@ -54,6 +54,12 @@ import { ThreadSearchInput } from "./threadSearch";
 import { OpenInEditorInput } from "./editor";
 import { ServerConfigUpdatedPayload, ServerProviderUpdatedPayload } from "./server";
 import { ServerSettingsPatch } from "./settings";
+import {
+  MobileDeviceRegistrationInput,
+  MobileGetPushStatusInput,
+  MobileSendTestNotificationInput,
+  MobileUnregisterDeviceInput,
+} from "./mobile";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
@@ -87,6 +93,10 @@ export const WS_METHODS = {
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
   threadsSearch: "threads.search",
+  mobileRegisterDevice: "mobile.registerDevice",
+  mobileUnregisterDevice: "mobile.unregisterDevice",
+  mobileGetPushStatus: "mobile.getPushStatus",
+  mobileSendTestNotification: "mobile.sendTestNotification",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -147,6 +157,10 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
   tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
   tagRequestBody(WS_METHODS.threadsSearch, ThreadSearchInput),
+  tagRequestBody(WS_METHODS.mobileRegisterDevice, MobileDeviceRegistrationInput),
+  tagRequestBody(WS_METHODS.mobileUnregisterDevice, MobileUnregisterDeviceInput),
+  tagRequestBody(WS_METHODS.mobileGetPushStatus, MobileGetPushStatusInput),
+  tagRequestBody(WS_METHODS.mobileSendTestNotification, MobileSendTestNotificationInput),
   tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
