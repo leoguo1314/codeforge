@@ -125,12 +125,14 @@ function parseNativePushRegistration(rawValue: unknown): NativePushRegistration 
     const pushProvider: MobilePushProvider =
       provider === "fcm" || provider === "huawei" || provider === "gateway" ? provider : "none";
     const pushToken = normalizeSharedText(record.pushToken);
+    const deviceId = normalizeSharedText(record.deviceId);
+    const appVersion = normalizeSharedText(record.appVersion);
     return {
-      deviceId: normalizeSharedText(record.deviceId) ?? undefined,
       pushProvider,
       pushToken: pushProvider === "none" ? null : pushToken,
-      appVersion: normalizeSharedText(record.appVersion) ?? undefined,
       deviceLabel: normalizeSharedText(record.deviceLabel),
+      ...(deviceId ? { deviceId } : {}),
+      ...(appVersion ? { appVersion } : {}),
     };
   } catch {
     return null;
@@ -143,10 +145,6 @@ export function getOrCreateAndroidDeviceId(storage: Pick<Storage, "getItem" | "s
   const generated = crypto.randomUUID();
   storage.setItem(ANDROID_DEVICE_ID_STORAGE_KEY, generated);
   return generated;
-}
-
-function androidVersionFromUserAgent(userAgent: string): string {
-  return /CodeForgeAndroid\/([^\s]+)/.exec(userAgent)?.[1] ?? ANDROID_CLIENT_VERSION;
 }
 
 export function readAndroidDeviceRegistration(): MobileDeviceRegistrationInput | null {
@@ -165,7 +163,9 @@ export function readAndroidDeviceRegistration(): MobileDeviceRegistrationInput |
     platform: "android",
     pushProvider: native?.pushProvider ?? "none",
     pushToken: native?.pushToken ?? null,
-    appVersion: native?.appVersion ?? androidVersionFromUserAgent(window.navigator.userAgent),
+    // Until a native provider bridge reports BuildConfig.VERSION_NAME, use the
+    // v0.6 mobile contract version rather than the legacy v0.5 User-Agent tag.
+    appVersion: native?.appVersion ?? ANDROID_CLIENT_VERSION,
     deviceLabel: native?.deviceLabel ?? "Android device",
   };
 }
