@@ -7,10 +7,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -39,8 +39,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.FileProvider;
+
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Locale;
 
@@ -50,7 +54,7 @@ import java.util.Locale;
  * Agent runtimes, Git, Terminal, Skills, persistence, and orchestration stay on
  * the remote CodeForge Server. Android supplies the mobile shell, secure remote
  * connection profile, native shares, pairing deep links, image selection,
- * quick camera capture, and background notifications.
+ * full-resolution private camera capture, and background notifications.
  */
 public final class MainActivity extends Activity {
     private static final String PREFS = "codeforge_android";
@@ -62,7 +66,7 @@ public final class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 7001;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 7002;
     private static final int CAMERA_CAPTURE_REQUEST = 7003;
-    private static final int CAMERA_TARGET_BYTES = 220 * 1024;
+    private static final int CAMERA_TARGET_BYTES = 480 * 1024;
 
     private static final int MENU_CAMERA = 1;
     private static final int MENU_RELOAD = 2;
@@ -72,10 +76,13 @@ public final class MainActivity extends Activity {
     private SharedPreferences preferences;
     private FrameLayout contentContainer;
     private TextView serverLabel;
+    private TextView connectionLabel;
     private WebView webView;
     private ValueCallback<Uri[]> pendingFileChooser;
     private String currentServerUrl;
     private String currentAuthToken;
+    private File pendingCameraFile;
+    private Uri pendingCameraUri;
     private final ArrayDeque<String> pendingShares = new ArrayDeque<>();
     private boolean foreground;
 
@@ -159,6 +166,16 @@ public final class MainActivity extends Activity {
             1f
         ));
 
+        connectionLabel = new TextView(this);
+        connectionLabel.setTextSize(11);
+        connectionLabel.setSingleLine(true);
+        connectionLabel.setPadding(dp(8), 0, dp(4), 0);
+        toolbar.addView(connectionLabel, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        updateConnectionState("offline");
+
         Button menuButton = new Button(this);
         menuButton.setText("⋮");
         menuButton.setTextSize(22);
@@ -195,6 +212,7 @@ public final class MainActivity extends Activity {
             }
             if (item.getItemId() == MENU_RELOAD) {
                 if (webView != null) {
+                    updateConnectionState("connecting");
                     webView.reload();
                 }
                 return true;
@@ -220,13 +238,57 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Connect to CodeForge before taking a photo.", Toast.LENGTH_SHORT).show();
             return;
         }
+
+        cleanupPendingCamera();
         try {
-            startActivityForResult(
-                new Intent(MediaStore.ACTION_IMAGE_CAPTURE),
-                CAMERA_CAPTURE_REQUEST
+            File cameraDirectory = new File(getCacheDir(), "camera");
+            if (!cameraDirectory.exists() && !cameraDirectory.mkdirs()) {
+                throw new IOException("Could not create the private camera directory.");
+            }
+            pendingCameraFile = File.createTempFile("codeforge-camera-", ".jpg", cameraDirectory);
+            pendingCameraUri = FileProvider.getUriForFile(
+                this,
+                getPackageName() + ".fileprovider",
+                pendingCameraFile
             );
+
+            Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraUri);
+            captureIntent.setClipData(ClipData.newRawUri("CodeForge camera capture", pendingCameraUri));
+            captureIntent.addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
+            startActivityForResult(captureIntent, CAMERA_CAPTURE_REQUEST);
         } catch (ActivityNotFoundException error) {
+            cleanupPendingCamera();
             Toast.makeText(this, "No camera app is available.", Toast.LENGTH_SHORT).show();
+        } catch (Exception error) {
+            cleanupPendingCamera();
+            Toast.makeText(this, "CodeForge could not prepare the camera capture.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void enqueueCameraUri(Uri uri) {
+        try {
+            JSONObject payload = AndroidImagePayload.fromUri(this, uri, CAMERA_TARGET_BYTES);
+            payload.put("kind", "image");
+            pendingShares.addLast(SHARE_PREFIX + payload.toString());
+            dispatchPendingShares();
+        } catch (Exception error) {
+            Toast.makeText(this, "CodeForge could not prepare the camera image.", Toast.LENGTH_SHORT).show();
+        } finally {
+            cleanupPendingCamera();
+        }
+    }
+
+    private void cleanupPendingCamera() {
+        pendingCameraUri = null;
+        if (pendingCameraFile != null) {
+            // The private full-resolution source is only a staging file. The
+            // Composer receives a bounded JPEG payload, then this file is removed.
+            //noinspection ResultOfMethodCallIgnored
+            pendingCameraFile.delete();
+            pendingCameraFile = null;
         }
     }
 
@@ -236,6 +298,7 @@ public final class MainActivity extends Activity {
         }
         contentContainer.removeAllViews();
         serverLabel.setText("CodeForge · not connected");
+        updateConnectionState("offline");
 
         ScrollView scrollView = new ScrollView(this);
         LinearLayout form = new LinearLayout(this);
@@ -356,6 +419,7 @@ public final class MainActivity extends Activity {
         Uri serverUri = Uri.parse(normalizedServerUrl);
         String authority = serverUri.getAuthority();
         serverLabel.setText(authority == null ? "CodeForge" : "CodeForge · " + authority);
+        updateConnectionState("connecting");
         showWebView(buildLaunchUri(normalizedServerUrl, normalizedToken));
     }
 
@@ -434,7 +498,7 @@ public final class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSafeBrowsingEnabled(true);
-        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.4");
+        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.5");
         CookieManager.getInstance().setAcceptCookie(true);
 
         view.addJavascriptInterface(new AndroidJavascriptBridge(), "CodeForgeAndroid");
@@ -500,21 +564,6 @@ public final class MainActivity extends Activity {
         }
         pendingShares.addLast(text);
         return true;
-    }
-
-    private void enqueueCameraBitmap(Bitmap bitmap) {
-        try {
-            JSONObject payload = AndroidImagePayload.fromBitmap(
-                bitmap,
-                "camera-" + System.currentTimeMillis() + ".jpg",
-                CAMERA_TARGET_BYTES
-            );
-            payload.put("kind", "image");
-            pendingShares.addLast(SHARE_PREFIX + payload.toString());
-            dispatchPendingShares();
-        } catch (Exception error) {
-            Toast.makeText(this, "CodeForge could not prepare the camera image.", Toast.LENGTH_SHORT).show();
-        }
     }
 
     private void dispatchPendingShares() {
@@ -589,6 +638,31 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void updateConnectionState(String state) {
+        if (connectionLabel == null) return;
+        switch (state == null ? "" : state) {
+            case "open":
+                connectionLabel.setText("● Connected");
+                connectionLabel.setTextColor(Color.rgb(94, 211, 130));
+                break;
+            case "connecting":
+                connectionLabel.setText("● Connecting");
+                connectionLabel.setTextColor(Color.rgb(151, 169, 206));
+                break;
+            case "reconnecting":
+                connectionLabel.setText("● Reconnecting");
+                connectionLabel.setTextColor(Color.rgb(238, 184, 86));
+                break;
+            case "offline":
+            case "closed":
+            case "disposed":
+            default:
+                connectionLabel.setText("● Offline");
+                connectionLabel.setTextColor(Color.rgb(225, 112, 112));
+                break;
+        }
+    }
+
     private void createNotificationChannel() {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager == null) {
@@ -655,6 +729,11 @@ public final class MainActivity extends Activity {
         public void notify(String kind, String title, String body) {
             runOnUiThread(() -> postAgentNotification(kind, title, body));
         }
+
+        @JavascriptInterface
+        public void connectionState(String state) {
+            runOnUiThread(() -> updateConnectionState(state));
+        }
     }
 
     private static final class PairingRequest {
@@ -667,30 +746,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    @SuppressWarnings("deprecation")
-    private Bitmap cameraBitmapFromResult(Intent data) {
-        if (data == null || data.getExtras() == null) {
-            return null;
-        }
-        if (Build.VERSION.SDK_INT >= 33) {
-            return data.getExtras().getParcelable("data", Bitmap.class);
-        }
-        Object value = data.getExtras().get("data");
-        return value instanceof Bitmap ? (Bitmap) value : null;
-    }
-
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == CAMERA_CAPTURE_REQUEST) {
-            if (resultCode == RESULT_OK) {
-                Bitmap bitmap = cameraBitmapFromResult(data);
-                if (bitmap != null) {
-                    enqueueCameraBitmap(bitmap);
-                } else {
-                    Toast.makeText(this, "Camera did not return an image.", Toast.LENGTH_SHORT).show();
-                }
+            if (resultCode == RESULT_OK && pendingCameraUri != null) {
+                enqueueCameraUri(pendingCameraUri);
+            } else {
+                cleanupPendingCamera();
             }
             return;
         }
@@ -714,6 +778,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        cleanupPendingCamera();
         if (pendingFileChooser != null) {
             pendingFileChooser.onReceiveValue(null);
             pendingFileChooser = null;
