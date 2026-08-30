@@ -35,7 +35,7 @@ function normalizeSharedText(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
-function parseAndroidShare(rawValue: unknown): AndroidSharedPayload | null {
+export function parseAndroidSharedPayload(rawValue: unknown): AndroidSharedPayload | null {
   const rawText = normalizeSharedText(rawValue);
   if (!rawText) return null;
 
@@ -82,7 +82,7 @@ export function installAndroidBridge(): void {
 
   window.__codeforgePendingAndroidShares ??= [];
   window.__codeforgeReceiveSharedText = (rawText: string) => {
-    const payload = parseAndroidShare(rawText);
+    const payload = parseAndroidSharedPayload(rawText);
     if (!payload) return;
 
     window.__codeforgePendingAndroidShares?.push(payload);
