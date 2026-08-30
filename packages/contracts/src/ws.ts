@@ -201,12 +201,12 @@ export const StreamingTextDeltaPayload = Schema.Struct({
 });
 export type StreamingTextDeltaPayload = typeof StreamingTextDeltaPayload.Type;
 
-export const MobileNotificationKind = Schema.Literals(["approval", "input", "complete"]);
+export const MobileNotificationKind = Schema.Literals(["approval", "input", "complete", "info"]);
 export type MobileNotificationKind = typeof MobileNotificationKind.Type;
 
 export const MobileNotificationPayload = Schema.Struct({
   kind: MobileNotificationKind,
-  threadId: ThreadId,
+  threadId: Schema.NullOr(ThreadId),
   title: TrimmedNonEmptyString,
   body: TrimmedNonEmptyString,
   createdAt: IsoDateTime,
