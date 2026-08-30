@@ -43,6 +43,33 @@ interface WsRequestEnvelope {
   };
 }
 
+export interface BrowserWsLocation {
+  readonly protocol?: string;
+  readonly host?: string;
+  readonly hostname: string;
+  readonly port: string;
+  readonly search?: string;
+}
+
+/**
+ * Resolve the WebSocket endpoint for browser/mobile clients served by the
+ * CodeForge server itself. The server authenticates WebSocket upgrades via a
+ * `token` query parameter, so preserve that token when the page was opened as
+ * `https://host/?token=...` (the Android client uses this path).
+ */
+export function resolveBrowserWsUrl(location: BrowserWsLocation): string {
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  const host =
+    location.host && location.host.length > 0
+      ? location.host
+      : location.port.length > 0
+        ? `${location.hostname}:${location.port}`
+        : location.hostname;
+  const baseUrl = `${protocol}://${host}`;
+  const token = new URLSearchParams(location.search ?? "").get("token");
+  return token && token.length > 0 ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl;
+}
+
 function asError(value: unknown, fallback: string): Error {
   if (value instanceof Error) {
     return value;
@@ -72,7 +99,7 @@ export class WsTransport {
         ? bridgeUrl
         : envUrl && envUrl.length > 0
           ? envUrl
-          : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${window.location.port}`);
+          : resolveBrowserWsUrl(window.location));
     this.connect();
   }
 
