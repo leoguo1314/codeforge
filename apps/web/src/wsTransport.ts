@@ -34,6 +34,8 @@ export type TransportState =
   | "closed"
   | "disposed";
 
+export const WS_TRANSPORT_STATE_EVENT = "codeforge:ws-transport-state";
+
 const REQUEST_TIMEOUT_MS = 60_000;
 const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000];
 const decodeWsResponse = decodeUnknownJsonResult(WsResponseSchema);
@@ -99,7 +101,7 @@ export class WsTransport {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
-  private state: TransportState = "connecting";
+  private state: TransportState = "closed";
   private readonly url: string;
   private readonly handleBrowserOnline = () => {
     if (this.disposed) return;
@@ -273,6 +275,13 @@ export class WsTransport {
       } catch {
         // Swallow observer errors; transport state must remain authoritative.
       }
+    }
+    if (
+      typeof window !== "undefined" &&
+      typeof window.dispatchEvent === "function" &&
+      typeof CustomEvent !== "undefined"
+    ) {
+      window.dispatchEvent(new CustomEvent<TransportState>(WS_TRANSPORT_STATE_EVENT, { detail: nextState }));
     }
   }
 
