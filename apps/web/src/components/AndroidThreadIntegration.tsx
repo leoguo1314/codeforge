@@ -10,7 +10,6 @@ import {
   type AndroidSharedPayload,
   consumePendingAndroidShares,
   isAndroidApp,
-  notifyAndroid,
   onAndroidShare,
 } from "../androidBridge";
 import {
@@ -19,20 +18,9 @@ import {
   useComposerThreadDraft,
 } from "../composerDraftStore";
 import { randomUUID } from "../lib/utils";
-import {
-  derivePendingApprovals,
-  derivePendingUserInputs,
-  isLatestTurnSettled,
-} from "../session-logic";
+import { derivePendingUserInputs } from "../session-logic";
 import { useStore } from "../store";
 import { toastManager } from "./ui/toast";
-
-type NotificationSnapshot = {
-  approvalCount: number;
-  inputCount: number;
-  latestTurnId: string | null;
-  latestTurnSettled: boolean;
-};
 
 const dataUrlToFile = (dataUrl: string, name: string, mimeType: string): File => {
   const commaIndex = dataUrl.indexOf(",");
@@ -68,6 +56,12 @@ const toComposerAttachment = (sharedImage: AndroidSharedImage): ComposerImageAtt
   };
 };
 
+/**
+ * Android-only Composer integration. Agent attention notifications no longer
+ * derive from projected thread state here; v0.5 consumes the Server's live
+ * `mobile.notification` channel in wsNativeApi so WebView notifications and a
+ * future push adapter share one canonical semantic source.
+ */
 export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
   const thread = useStore((store) => store.threads.find((candidate) => candidate.id === threadId));
   const composerDraft = useComposerThreadDraft(threadId);
@@ -77,11 +71,7 @@ export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
   promptRef.current = composerDraft.prompt;
 
   const activities = thread?.activities ?? [];
-  const approvalCount = useMemo(() => derivePendingApprovals(activities).length, [activities]);
   const inputCount = useMemo(() => derivePendingUserInputs(activities).length, [activities]);
-  const latestTurnId = thread?.latestTurn?.turnId ?? null;
-  const latestTurnSettled = isLatestTurnSettled(thread?.latestTurn ?? null, thread?.session ?? null);
-  const threadTitle = thread?.title?.trim() || "CodeForge thread";
 
   useEffect(() => {
     if (!isAndroidApp()) return;
@@ -141,36 +131,6 @@ export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
     drainPendingShares();
     return onAndroidShare(() => drainPendingShares());
   }, [addImage, inputCount, setPrompt, threadId]);
-
-  const previousSnapshotRef = useRef<NotificationSnapshot | null>(null);
-  useEffect(() => {
-    if (!isAndroidApp()) return;
-
-    const nextSnapshot: NotificationSnapshot = {
-      approvalCount,
-      inputCount,
-      latestTurnId,
-      latestTurnSettled,
-    };
-    const previous = previousSnapshotRef.current;
-    previousSnapshotRef.current = nextSnapshot;
-
-    // Do not notify for historical state when opening an existing thread.
-    if (!previous) return;
-
-    if (previous.approvalCount === 0 && approvalCount > 0) {
-      notifyAndroid("approval", "Approval required", threadTitle);
-    }
-
-    if (previous.inputCount === 0 && inputCount > 0) {
-      notifyAndroid("input", "Agent needs your input", threadTitle);
-    }
-
-    const sameTurn = previous.latestTurnId !== null && previous.latestTurnId === latestTurnId;
-    if (sameTurn && !previous.latestTurnSettled && latestTurnSettled) {
-      notifyAndroid("complete", "Agent turn completed", threadTitle);
-    }
-  }, [approvalCount, inputCount, latestTurnId, latestTurnSettled, threadTitle]);
 
   return null;
 }
