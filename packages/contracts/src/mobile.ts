@@ -19,7 +19,7 @@ export const MobileDeviceRegistrationInput = Schema.Struct({
   pushProvider: MobilePushProvider,
   pushToken: Schema.NullOr(TrimmedNonEmptyString),
   appVersion: TrimmedNonEmptyString,
-  deviceLabel: Schema.optional(TrimmedNonEmptyString),
+  deviceLabel: Schema.NullOr(TrimmedNonEmptyString),
 });
 export type MobileDeviceRegistrationInput = typeof MobileDeviceRegistrationInput.Type;
 
