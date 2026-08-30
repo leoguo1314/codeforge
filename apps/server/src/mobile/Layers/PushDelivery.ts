@@ -167,4 +167,4 @@ const makePushDelivery = Effect.gen(function* () {
   return { enqueue, getStatus, sendTest } satisfies PushDeliveryShape;
 });
 
-export const PushDeliveryLive = Layer.scoped(PushDeliveryService, makePushDelivery);
+export const PushDeliveryLive = Layer.effect(PushDeliveryService, makePushDelivery);
