@@ -5,6 +5,7 @@ on:
     paths:
       - "apps/android/**"
       - "apps/web/src/androidBridge.ts"
+      - "apps/web/src/androidBridge.test.ts"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/routes/_chat.tsx"
@@ -17,6 +18,7 @@ on:
     paths:
       - "apps/android/**"
       - "apps/web/src/androidBridge.ts"
+      - "apps/web/src/androidBridge.test.ts"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/routes/_chat.tsx"
@@ -44,8 +46,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Test WebSocket transport
-        run: bun run --cwd apps/web test -- src/wsTransport.test.ts
+      - name: Test Android web transport
+        run: bun run --cwd apps/web test -- src/wsTransport.test.ts src/androidBridge.test.ts
 
       - name: Typecheck web
         run: bun run --cwd apps/web typecheck
