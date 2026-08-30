@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CodeForge</string>
+    <string name="connection_title">Connect to CodeForge</string>
+    <string name="connection_description">Run CodeForge Server on your development machine or server, then enter its HTTPS address and WebSocket auth token.</string>
+    <string name="server_url_hint">https://codeforge.example.com</string>
+    <string name="auth_token_hint">Auth token</string>
+    <string name="connect">Connect</string>
+    <string name="connection_security_hint">Release builds require HTTPS. Debug builds also allow LAN HTTP for local development.</string>
+</resources>
