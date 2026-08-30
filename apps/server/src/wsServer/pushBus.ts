@@ -2,6 +2,7 @@ import {
   ORCHESTRATION_WS_CHANNELS,
   WS_CHANNELS,
   WsPush,
+  type MobileNotificationPayload,
   type OrchestrationEvent,
   type WsPushChannel,
   type WsPushData,
@@ -39,6 +40,9 @@ export interface ServerPushBus {
 export const makeServerPushBus = (input: {
   readonly clients: Ref.Ref<Set<WebSocket>>;
   readonly logOutgoingPush: (push: WsPushEnvelopeBase, recipients: number) => void;
+  readonly enqueueMobileNotification?: (
+    notification: MobileNotificationPayload,
+  ) => Effect.Effect<void>;
 }): Effect.Effect<ServerPushBus, never, Scope.Scope> =>
   Effect.gen(function* () {
     const nextSequence = yield* Ref.make(0);
@@ -112,6 +116,9 @@ export const makeServerPushBus = (input: {
         const notification = mobileNotificationFromEvent(data as OrchestrationEvent);
         if (notification) {
           yield* publishAllBase(WS_CHANNELS.mobileNotification, notification);
+          if (input.enqueueMobileNotification) {
+            yield* input.enqueueMobileNotification(notification);
+          }
         }
       });
 
