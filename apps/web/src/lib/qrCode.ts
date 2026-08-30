@@ -1,6 +1,9 @@
 type QrBlock = { total: number; data: number };
+type QrVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+type MutableMatrix<T> = T[][];
+type ReadonlyMatrix<T> = readonly (readonly T[])[];
 
-const QR_L_BLOCKS: Readonly<Record<number, readonly QrBlock[]>> = {
+const QR_L_BLOCKS: Readonly<Record<QrVersion, readonly QrBlock[]>> = {
   1: [{ total: 26, data: 19 }],
   2: [{ total: 44, data: 34 }],
   3: [{ total: 70, data: 55 }],
@@ -30,7 +33,7 @@ const QR_L_BLOCKS: Readonly<Record<number, readonly QrBlock[]>> = {
   ],
 };
 
-const ALIGNMENT_PATTERN_POSITIONS: Readonly<Record<number, readonly number[]>> = {
+const ALIGNMENT_PATTERN_POSITIONS: Readonly<Record<QrVersion, readonly number[]>> = {
   1: [],
   2: [6, 18],
   3: [6, 22],
@@ -43,6 +46,53 @@ const ALIGNMENT_PATTERN_POSITIONS: Readonly<Record<number, readonly number[]>> =
   10: [6, 28, 50],
 };
 
+function requireAt<T>(values: ArrayLike<T>, index: number, label = "QR buffer"): T {
+  const value = values[index];
+  if (value === undefined) {
+    throw new Error(`${label} index ${index} is out of range.`);
+  }
+  return value;
+}
+
+function rowAt<T>(matrix: ReadonlyMatrix<T>, row: number): readonly T[] {
+  const value = matrix[row];
+  if (!value) throw new Error(`QR matrix row ${row} is out of range.`);
+  return value;
+}
+
+function mutableRowAt<T>(matrix: MutableMatrix<T>, row: number): T[] {
+  const value = matrix[row];
+  if (!value) throw new Error(`QR matrix row ${row} is out of range.`);
+  return value;
+}
+
+function cellAt<T>(matrix: ReadonlyMatrix<T>, row: number, column: number): T {
+  return requireAt(rowAt(matrix, row), column, "QR matrix");
+}
+
+function setCell<T>(matrix: MutableMatrix<T>, row: number, column: number, value: T): void {
+  const targetRow = mutableRowAt(matrix, row);
+  if (column < 0 || column >= targetRow.length) {
+    throw new Error(`QR matrix column ${column} is out of range.`);
+  }
+  targetRow[column] = value;
+}
+
+function asQrVersion(version: number): QrVersion {
+  if (!Number.isInteger(version) || version < 1 || version > 10) {
+    throw new Error(`Unsupported QR version ${version}.`);
+  }
+  return version as QrVersion;
+}
+
+function blocksForVersion(version: number): readonly QrBlock[] {
+  return QR_L_BLOCKS[asQrVersion(version)];
+}
+
+function alignmentForVersion(version: number): readonly number[] {
+  return ALIGNMENT_PATTERN_POSITIONS[asQrVersion(version)];
+}
+
 const GF_EXP = new Uint8Array(512);
 const GF_LOG = new Uint8Array(256);
 let gfValue = 1;
@@ -53,7 +103,7 @@ for (let index = 0; index < 255; index += 1) {
   if (gfValue & 0x100) gfValue ^= 0x11d;
 }
 for (let index = 255; index < GF_EXP.length; index += 1) {
-  GF_EXP[index] = GF_EXP[index - 255];
+  GF_EXP[index] = requireAt(GF_EXP, index - 255, "GF exponent table");
 }
 
 class BitBuffer {
@@ -72,7 +122,9 @@ class BitBuffer {
   toBytes(): number[] {
     const bytes = Array.from({ length: Math.ceil(this.bits.length / 8) }, () => 0);
     for (let index = 0; index < this.bits.length; index += 1) {
-      if (this.bits[index]) bytes[index >>> 3] |= 0x80 >>> (index & 7);
+      if (this.bits[index] !== true) continue;
+      const byteIndex = index >>> 3;
+      bytes[byteIndex] = requireAt(bytes, byteIndex) | (0x80 >>> (index & 7));
     }
     return bytes;
   }
@@ -82,11 +134,16 @@ function multiplyPoly(left: number[], right: number[]): number[] {
   const result = Array.from({ length: left.length + right.length - 1 }, () => 0);
   for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
     for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
-      const leftValue = left[leftIndex];
-      const rightValue = right[rightIndex];
+      const leftValue = requireAt(left, leftIndex);
+      const rightValue = requireAt(right, rightIndex);
       if (leftValue === 0 || rightValue === 0) continue;
-      result[leftIndex + rightIndex] ^=
-        GF_EXP[(GF_LOG[leftValue] + GF_LOG[rightValue]) % 255];
+      const targetIndex = leftIndex + rightIndex;
+      const product = requireAt(
+        GF_EXP,
+        (requireAt(GF_LOG, leftValue) + requireAt(GF_LOG, rightValue)) % 255,
+        "GF exponent table",
+      );
+      result[targetIndex] = requireAt(result, targetIndex) ^ product;
     }
   }
   return result;
@@ -95,7 +152,7 @@ function multiplyPoly(left: number[], right: number[]): number[] {
 function generatorPolynomial(ecCount: number): number[] {
   let generator = [1];
   for (let index = 0; index < ecCount; index += 1) {
-    generator = multiplyPoly(generator, [1, GF_EXP[index]]);
+    generator = multiplyPoly(generator, [1, requireAt(GF_EXP, index, "GF exponent table")]);
   }
   return generator;
 }
@@ -105,15 +162,20 @@ function reedSolomon(data: readonly number[], ecCount: number): number[] {
   const remainder = Array.from({ length: ecCount }, () => 0);
 
   for (const byte of data) {
-    const factor = byte ^ remainder[0];
+    const factor = byte ^ requireAt(remainder, 0, "Reed-Solomon remainder");
     remainder.shift();
     remainder.push(0);
     if (factor === 0) continue;
-    const factorLog = GF_LOG[factor];
+    const factorLog = requireAt(GF_LOG, factor, "GF logarithm table");
     for (let index = 0; index < ecCount; index += 1) {
-      const coefficient = generator[index + 1];
+      const coefficient = requireAt(generator, index + 1, "Generator polynomial");
       if (coefficient === 0) continue;
-      remainder[index] ^= GF_EXP[(factorLog + GF_LOG[coefficient]) % 255];
+      const product = requireAt(
+        GF_EXP,
+        (factorLog + requireAt(GF_LOG, coefficient, "GF logarithm table")) % 255,
+        "GF exponent table",
+      );
+      remainder[index] = requireAt(remainder, index, "Reed-Solomon remainder") ^ product;
     }
   }
 
@@ -169,12 +231,12 @@ function createCodewords(text: string, version: number, blocks: readonly QrBlock
 
   for (let index = 0; index < maxData; index += 1) {
     for (const block of dataBlocks) {
-      if (index < block.length) result.push(block[index]);
+      if (index < block.length) result.push(requireAt(block, index));
     }
   }
   for (let index = 0; index < maxError; index += 1) {
     for (const block of errorBlocks) {
-      if (index < block.length) result.push(block[index]);
+      if (index < block.length) result.push(requireAt(block, index));
     }
   }
   return result;
@@ -199,7 +261,7 @@ function versionBits(version: number): number {
   return (version << 12) | bchRemainder(version << 12, 0x1f25);
 }
 
-function setFinder(matrix: (boolean | null)[][], row: number, column: number): void {
+function setFinder(matrix: MutableMatrix<boolean | null>, row: number, column: number): void {
   const size = matrix.length;
   for (let rowOffset = -1; rowOffset <= 7; rowOffset += 1) {
     for (let columnOffset = -1; columnOffset <= 7; columnOffset += 1) {
@@ -216,58 +278,62 @@ function setFinder(matrix: (boolean | null)[][], row: number, column: number): v
           columnOffset === 0 ||
           columnOffset === 6 ||
           (rowOffset >= 2 && rowOffset <= 4 && columnOffset >= 2 && columnOffset <= 4));
-      matrix[targetRow][targetColumn] = black;
+      setCell(matrix, targetRow, targetColumn, black);
     }
   }
 }
 
-function setAlignmentPatterns(matrix: (boolean | null)[][], version: number): void {
-  const positions = ALIGNMENT_PATTERN_POSITIONS[version];
+function setAlignmentPatterns(matrix: MutableMatrix<boolean | null>, version: number): void {
+  const positions = alignmentForVersion(version);
   for (const row of positions) {
     for (const column of positions) {
-      if (matrix[row][column] !== null) continue;
+      if (cellAt(matrix, row, column) !== null) continue;
       for (let rowOffset = -2; rowOffset <= 2; rowOffset += 1) {
         for (let columnOffset = -2; columnOffset <= 2; columnOffset += 1) {
-          matrix[row + rowOffset][column + columnOffset] =
-            Math.max(Math.abs(rowOffset), Math.abs(columnOffset)) !== 1;
+          setCell(
+            matrix,
+            row + rowOffset,
+            column + columnOffset,
+            Math.max(Math.abs(rowOffset), Math.abs(columnOffset)) !== 1,
+          );
         }
       }
     }
   }
 }
 
-function setTimingPatterns(matrix: (boolean | null)[][]): void {
+function setTimingPatterns(matrix: MutableMatrix<boolean | null>): void {
   const size = matrix.length;
   for (let index = 8; index < size - 8; index += 1) {
-    if (matrix[index][6] === null) matrix[index][6] = index % 2 === 0;
-    if (matrix[6][index] === null) matrix[6][index] = index % 2 === 0;
+    if (cellAt(matrix, index, 6) === null) setCell(matrix, index, 6, index % 2 === 0);
+    if (cellAt(matrix, 6, index) === null) setCell(matrix, 6, index, index % 2 === 0);
   }
 }
 
-function setFormatInfo(matrix: (boolean | null)[][], mask: number): void {
+function setFormatInfo(matrix: MutableMatrix<boolean | null>, mask: number): void {
   const size = matrix.length;
   const bits = formatBits(mask);
   for (let index = 0; index < 15; index += 1) {
     const black = ((bits >>> index) & 1) === 1;
-    if (index < 6) matrix[index][8] = black;
-    else if (index < 8) matrix[index + 1][8] = black;
-    else matrix[size - 15 + index][8] = black;
+    if (index < 6) setCell(matrix, index, 8, black);
+    else if (index < 8) setCell(matrix, index + 1, 8, black);
+    else setCell(matrix, size - 15 + index, 8, black);
 
-    if (index < 8) matrix[8][size - index - 1] = black;
-    else if (index === 8) matrix[8][7] = black;
-    else matrix[8][15 - index - 1] = black;
+    if (index < 8) setCell(matrix, 8, size - index - 1, black);
+    else if (index === 8) setCell(matrix, 8, 7, black);
+    else setCell(matrix, 8, 15 - index - 1, black);
   }
-  matrix[size - 8][8] = true;
+  setCell(matrix, size - 8, 8, true);
 }
 
-function setVersionInfo(matrix: (boolean | null)[][], version: number): void {
+function setVersionInfo(matrix: MutableMatrix<boolean | null>, version: number): void {
   if (version < 7) return;
   const size = matrix.length;
   const bits = versionBits(version);
   for (let index = 0; index < 18; index += 1) {
     const black = ((bits >>> index) & 1) === 1;
-    matrix[Math.floor(index / 3)][(index % 3) + size - 11] = black;
-    matrix[(index % 3) + size - 11][Math.floor(index / 3)] = black;
+    setCell(matrix, Math.floor(index / 3), (index % 3) + size - 11, black);
+    setCell(matrix, (index % 3) + size - 11, Math.floor(index / 3), black);
   }
 }
 
@@ -294,7 +360,11 @@ function maskBit(row: number, column: number, mask: number): boolean {
   }
 }
 
-function mapCodewords(matrix: (boolean | null)[][], codewords: readonly number[], mask: number): void {
+function mapCodewords(
+  matrix: MutableMatrix<boolean | null>,
+  codewords: readonly number[],
+  mask: number,
+): void {
   const size = matrix.length;
   let byteIndex = 0;
   let bitIndex = 7;
@@ -306,13 +376,13 @@ function mapCodewords(matrix: (boolean | null)[][], codewords: readonly number[]
       const row = upward ? size - 1 - verticalIndex : verticalIndex;
       for (let offset = 0; offset < 2; offset += 1) {
         const column = right - offset;
-        if (matrix[row][column] !== null) continue;
+        if (cellAt(matrix, row, column) !== null) continue;
         let black = false;
         if (byteIndex < codewords.length) {
-          black = ((codewords[byteIndex] >>> bitIndex) & 1) === 1;
+          black = ((requireAt(codewords, byteIndex) >>> bitIndex) & 1) === 1;
         }
         if (maskBit(row, column, mask)) black = !black;
-        matrix[row][column] = black;
+        setCell(matrix, row, column, black);
         bitIndex -= 1;
         if (bitIndex < 0) {
           byteIndex += 1;
@@ -324,14 +394,14 @@ function mapCodewords(matrix: (boolean | null)[][], codewords: readonly number[]
   }
 }
 
-function penaltyScore(matrix: readonly (readonly boolean[])[]): number {
+function penaltyScore(matrix: ReadonlyMatrix<boolean>): number {
   const size = matrix.length;
   let score = 0;
 
   const scoreLine = (values: readonly boolean[]) => {
     let runLength = 1;
     for (let index = 1; index < values.length; index += 1) {
-      if (values[index] === values[index - 1]) {
+      if (requireAt(values, index) === requireAt(values, index - 1)) {
         runLength += 1;
         if (runLength === 5) score += 3;
         else if (runLength > 5) score += 1;
@@ -341,18 +411,18 @@ function penaltyScore(matrix: readonly (readonly boolean[])[]): number {
     }
   };
 
-  for (let row = 0; row < size; row += 1) scoreLine(matrix[row]);
+  for (let row = 0; row < size; row += 1) scoreLine(rowAt(matrix, row));
   for (let column = 0; column < size; column += 1) {
-    scoreLine(matrix.map((row) => row[column]));
+    scoreLine(matrix.map((row) => requireAt(row, column, "QR matrix")));
   }
 
   for (let row = 0; row < size - 1; row += 1) {
     for (let column = 0; column < size - 1; column += 1) {
-      const value = matrix[row][column];
+      const value = cellAt(matrix, row, column);
       if (
-        value === matrix[row + 1][column] &&
-        value === matrix[row][column + 1] &&
-        value === matrix[row + 1][column + 1]
+        value === cellAt(matrix, row + 1, column) &&
+        value === cellAt(matrix, row, column + 1) &&
+        value === cellAt(matrix, row + 1, column + 1)
       ) {
         score += 3;
       }
@@ -361,18 +431,18 @@ function penaltyScore(matrix: readonly (readonly boolean[])[]): number {
 
   const finderPattern = [true, false, true, true, true, false, true];
   const quiet = [false, false, false, false];
+  const left = [...finderPattern, ...quiet];
+  const right = [...quiet, ...finderPattern];
   const hasPattern = (line: readonly boolean[]) => {
     for (let start = 0; start <= line.length - 11; start += 1) {
       const window = line.slice(start, start + 11);
-      const left = [...finderPattern, ...quiet];
-      const right = [...quiet, ...finderPattern];
-      if (window.every((value, index) => value === left[index])) score += 40;
-      if (window.every((value, index) => value === right[index])) score += 40;
+      if (window.every((value, index) => value === requireAt(left, index))) score += 40;
+      if (window.every((value, index) => value === requireAt(right, index))) score += 40;
     }
   };
-  for (let row = 0; row < size; row += 1) hasPattern(matrix[row]);
+  for (let row = 0; row < size; row += 1) hasPattern(rowAt(matrix, row));
   for (let column = 0; column < size; column += 1) {
-    hasPattern(matrix.map((row) => row[column]));
+    hasPattern(matrix.map((row) => requireAt(row, column, "QR matrix")));
   }
 
   const dark = matrix.flat().filter(Boolean).length;
@@ -381,9 +451,9 @@ function penaltyScore(matrix: readonly (readonly boolean[])[]): number {
 }
 
 function buildMatrix(text: string, version: number, mask: number): boolean[][] {
-  const blocks = QR_L_BLOCKS[version];
+  const blocks = blocksForVersion(version);
   const size = version * 4 + 17;
-  const matrix: (boolean | null)[][] = Array.from({ length: size }, () =>
+  const matrix: MutableMatrix<boolean | null> = Array.from({ length: size }, () =>
     Array.from({ length: size }, () => null),
   );
 
@@ -401,7 +471,7 @@ function buildMatrix(text: string, version: number, mask: number): boolean[][] {
 
 function fitsVersion(text: string, version: number): boolean {
   try {
-    createDataCodewords(text, version, QR_L_BLOCKS[version]);
+    createDataCodewords(text, version, blocksForVersion(version));
     return true;
   } catch {
     return false;
@@ -432,21 +502,26 @@ export function createQrMatrix(text: string): boolean[][] {
   return bestMatrix;
 }
 
-export function qrMatrixToPath(matrix: readonly (readonly boolean[])[], quietZone = 4): {
+export function qrMatrixToPath(matrix: ReadonlyMatrix<boolean>, quietZone = 4): {
   path: string;
   viewBoxSize: number;
 } {
   const commands: string[] = [];
   for (let row = 0; row < matrix.length; row += 1) {
     let column = 0;
+    const currentRow = rowAt(matrix, row);
     while (column < matrix.length) {
-      if (!matrix[row][column]) {
+      if (requireAt(currentRow, column, "QR matrix") !== true) {
         column += 1;
         continue;
       }
       const start = column;
-      while (column < matrix.length && matrix[row][column]) column += 1;
-      commands.push(`M${start + quietZone} ${row + quietZone}h${column - start}v1H${start + quietZone}z`);
+      while (column < matrix.length && requireAt(currentRow, column, "QR matrix") === true) {
+        column += 1;
+      }
+      commands.push(
+        `M${start + quietZone} ${row + quietZone}h${column - start}v1H${start + quietZone}z`,
+      );
     }
   }
   return {
