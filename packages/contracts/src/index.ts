@@ -5,6 +5,7 @@ export * from "./provider";
 export * from "./providerRuntime";
 export * from "./model";
 export * from "./ws";
+export * from "./mobile";
 export * from "./keybindings";
 export * from "./server";
 export * from "./settings";
