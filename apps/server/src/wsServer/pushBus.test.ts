@@ -1,8 +1,11 @@
 import type { WebSocket } from "ws";
-import { it } from "@effect/vitest";
-import { describe, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Effect, Ref } from "effect";
-import { WS_CHANNELS } from "@codeforge/contracts";
+import {
+  ORCHESTRATION_WS_CHANNELS,
+  WS_CHANNELS,
+  type OrchestrationEvent,
+} from "@codeforge/contracts";
 
 import { makeServerPushBus } from "./pushBus";
 
@@ -16,33 +19,28 @@ class MockWebSocket {
 
   send(message: string) {
     this.sent.push(message);
-    for (const waiter of this.waiters) {
-      waiter();
-    }
+    for (const waiter of this.waiters) waiter();
   }
 
   waitForSentCount(count: number): Promise<void> {
-    if (this.sent.length >= count) {
-      return Promise.resolve();
-    }
-
+    if (this.sent.length >= count) return Promise.resolve();
     return new Promise((resolve) => {
       const check = () => {
-        if (this.sent.length < count) {
-          return;
-        }
+        if (this.sent.length < count) return;
         this.waiters.delete(check);
         resolve();
       };
-
       this.waiters.add(check);
     });
   }
 }
 
+const runScoped = <A, E>(effect: Effect.Effect<A, E, never>) =>
+  Effect.runPromise(Effect.scoped(effect as Effect.Effect<A, E, never>));
+
 describe("makeServerPushBus", () => {
-  it.live("waits for the welcome push before a new client joins broadcast delivery", () =>
-    Effect.scoped(
+  it("waits for the welcome push before a new client joins broadcast delivery", async () => {
+    await runScoped(
       Effect.gen(function* () {
         const client = new MockWebSocket();
         const clients = yield* Ref.make(new Set<WebSocket>());
@@ -66,11 +64,7 @@ describe("makeServerPushBus", () => {
         expect(delivered).toBe(true);
 
         yield* Ref.update(clients, (current) => current.add(client as unknown as WebSocket));
-
-        yield* pushBus.publishAll(WS_CHANNELS.serverConfigUpdated, {
-          issues: [],
-        });
-
+        yield* pushBus.publishAll(WS_CHANNELS.serverConfigUpdated, { issues: [] });
         yield* Effect.promise(() => client.waitForSentCount(2));
 
         const messages = client.sent.map(
@@ -91,11 +85,67 @@ describe("makeServerPushBus", () => {
           type: "push",
           sequence: 3,
           channel: WS_CHANNELS.serverConfigUpdated,
-          data: {
-            issues: [],
-          },
+          data: { issues: [] },
         });
       }),
-    ),
-  );
+    );
+  });
+
+  it("fans durable turn completion into a normalized mobile notification", async () => {
+    await runScoped(
+      Effect.gen(function* () {
+        const client = new MockWebSocket();
+        const clients = yield* Ref.make(new Set<WebSocket>([client as unknown as WebSocket]));
+        const pushBus = yield* makeServerPushBus({
+          clients,
+          logOutgoingPush: () => {},
+        });
+
+        const event = {
+          sequence: 42,
+          eventId: "event-mobile-complete",
+          aggregateKind: "thread",
+          aggregateId: "thread-mobile",
+          occurredAt: "2026-08-31T00:00:03.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.turn-diff-completed",
+          payload: {
+            threadId: "thread-mobile",
+            turnId: "turn-mobile",
+            checkpointTurnCount: 1,
+            checkpointRef: "checkpoint-mobile",
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-08-31T00:00:03.000Z",
+          },
+        } as OrchestrationEvent;
+
+        yield* pushBus.publishAll(ORCHESTRATION_WS_CHANNELS.domainEvent, event);
+        yield* Effect.promise(() => client.waitForSentCount(2));
+
+        const messages = client.sent.map(
+          (message) =>
+            JSON.parse(message) as {
+              channel: string;
+              data: Record<string, unknown>;
+            },
+        );
+
+        expect(messages.map((message) => message.channel)).toEqual([
+          ORCHESTRATION_WS_CHANNELS.domainEvent,
+          WS_CHANNELS.mobileNotification,
+        ]);
+        expect(messages[1]?.data).toMatchObject({
+          kind: "complete",
+          threadId: "thread-mobile",
+          title: "Agent turn completed",
+          createdAt: "2026-08-31T00:00:03.000Z",
+        });
+      }),
+    );
+  });
 });
