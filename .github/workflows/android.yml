@@ -30,6 +30,7 @@ on:
       - "packages/contracts/src/ipc.ts"
       - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
+      - "turbo.json"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
@@ -60,6 +61,7 @@ on:
       - "packages/contracts/src/ipc.ts"
       - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
+      - "turbo.json"
       - ".github/workflows/android.yml"
 
 permissions:
