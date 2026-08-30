@@ -118,6 +118,9 @@ export class WsTransport {
       this.reconnectTimer = null;
     }
     this.setState("offline");
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      this.ws.close();
+    }
   };
 
   constructor(url?: string) {
@@ -281,7 +284,9 @@ export class WsTransport {
       typeof window.dispatchEvent === "function" &&
       typeof CustomEvent !== "undefined"
     ) {
-      window.dispatchEvent(new CustomEvent<TransportState>(WS_TRANSPORT_STATE_EVENT, { detail: nextState }));
+      window.dispatchEvent(
+        new CustomEvent<TransportState>(WS_TRANSPORT_STATE_EVENT, { detail: nextState }),
+      );
     }
   }
 
