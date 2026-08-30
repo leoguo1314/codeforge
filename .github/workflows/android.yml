@@ -17,6 +17,7 @@ on:
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
       - "apps/server/src/wsServer/pushBus.ts"
+      - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
       - "apps/server/src/wsServer/mobileNotifications.test.ts"
       - "packages/contracts/src/ws.ts"
@@ -37,6 +38,7 @@ on:
       - "apps/web/src/wsTransport.test.ts"
       - "apps/web/src/wsTransport.mobile.test.ts"
       - "apps/server/src/wsServer/pushBus.ts"
+      - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
       - "apps/server/src/wsServer/mobileNotifications.test.ts"
       - "packages/contracts/src/ws.ts"
@@ -66,14 +68,11 @@ jobs:
       - name: Typecheck web
         run: bun run --cwd apps/web typecheck
 
-      - name: Test mobile server notification contract
-        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts
+      - name: Typecheck shared contracts
+        run: bun run --cwd packages/contracts typecheck
 
-      - name: Provision Bun type definitions
-        run: bun add --no-save @types/bun@1.3.9
-
-      - name: Typecheck server
-        run: bun run --cwd apps/server typecheck
+      - name: Test mobile server notification and push bus
+        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts
 
   build-debug-apk:
     runs-on: ubuntu-latest
