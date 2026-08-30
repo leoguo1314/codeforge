@@ -2,52 +2,54 @@ package ai.codeforge.android;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.database.Cursor;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.OpenableColumns;
 import android.text.TextUtils;
-import android.util.Base64;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Receives Android image shares and converts them into a bounded payload that
+ * Receives Android image shares and converts them into bounded payloads that
  * MainActivity can deliver to the existing CodeForge Web composer bridge.
  *
- * The payload is deliberately kept small because Intent extras and WebView
- * evaluateJavascript calls ultimately cross Binder boundaries. Images are
- * resized and JPEG-compressed before being forwarded; nothing is auto-sent.
+ * Nothing is auto-sent. Multi-image shares are capped so the combined Intent
+ * payload remains safely below practical Binder transaction limits.
  */
 public final class ShareReceiverActivity extends Activity {
     private static final String SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
-    private static final int MAX_DECODE_EDGE = 2200;
-    private static final int MAX_OUTPUT_EDGE = 1400;
-    private static final int TARGET_JPEG_BYTES = 240 * 1024;
-    private static final int MIN_OUTPUT_EDGE = 520;
+    private static final int MAX_SHARED_IMAGES = 4;
+    private static final int SINGLE_IMAGE_TARGET_BYTES = 220 * 1024;
+    private static final int MULTI_IMAGE_TARGET_BYTES = 96 * 1024;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         Intent source = getIntent();
-        Uri stream = sharedStreamFromIntent(source);
-        if (stream == null) {
+        List<Uri> streams = sharedStreamsFromIntent(source);
+        if (streams.isEmpty()) {
             Toast.makeText(this, "CodeForge could not read the shared image.", Toast.LENGTH_SHORT).show();
+            finish();
+            return;
+        }
+        if (streams.size() > MAX_SHARED_IMAGES) {
+            Toast.makeText(
+                this,
+                "CodeForge supports up to " + MAX_SHARED_IMAGES + " images per share.",
+                Toast.LENGTH_LONG
+            ).show();
             finish();
             return;
         }
 
         try {
-            String payload = buildImagePayload(source, stream);
+            String payload = buildImagePayload(source, streams);
             Intent target = new Intent(this, MainActivity.class)
                 .setAction(Intent.ACTION_SEND)
                 .setType("text/plain")
@@ -65,161 +67,68 @@ public final class ShareReceiverActivity extends Activity {
         }
     }
 
-    private String buildImagePayload(Intent source, Uri uri) throws Exception {
-        Bitmap decoded = decodeSampledBitmap(uri);
-        if (decoded == null) {
-            throw new IOException("Could not decode image.");
-        }
-
-        Bitmap working = scaleToMaxEdge(decoded, MAX_OUTPUT_EDGE);
-        if (working != decoded) {
-            decoded.recycle();
-        }
-
-        byte[] jpegBytes;
-        try {
-            jpegBytes = compressBoundedJpeg(working);
-        } finally {
-            working.recycle();
-        }
-
-        String originalName = displayName(uri);
-        String imageName = normalizeJpegName(originalName);
-        String dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(jpegBytes, Base64.NO_WRAP);
+    private String buildImagePayload(Intent source, List<Uri> streams) throws Exception {
         CharSequence sharedText = source.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        String caption = sharedText == null ? "" : sharedText.toString().trim();
 
-        JSONObject json = new JSONObject();
-        json.put("kind", "image");
-        json.put("name", imageName);
-        json.put("mimeType", "image/jpeg");
-        json.put("dataUrl", dataUrl);
-        if (sharedText != null && !TextUtils.isEmpty(sharedText.toString().trim())) {
-            json.put("text", sharedText.toString().trim());
-        }
-        return json.toString();
-    }
-
-    private Bitmap decodeSampledBitmap(Uri uri) throws IOException {
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            if (input == null) throw new IOException("Shared image is unavailable.");
-            BitmapFactory.decodeStream(input, null, bounds);
-        }
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            throw new IOException("Shared image dimensions are unavailable.");
-        }
-
-        int sampleSize = 1;
-        while (
-            bounds.outWidth / sampleSize > MAX_DECODE_EDGE ||
-            bounds.outHeight / sampleSize > MAX_DECODE_EDGE
-        ) {
-            sampleSize *= 2;
-        }
-
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = sampleSize;
-        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            if (input == null) throw new IOException("Shared image is unavailable.");
-            return BitmapFactory.decodeStream(input, null, options);
-        }
-    }
-
-    private Bitmap scaleToMaxEdge(Bitmap bitmap, int maxEdge) {
-        int width = bitmap.getWidth();
-        int height = bitmap.getHeight();
-        int currentMax = Math.max(width, height);
-        if (currentMax <= maxEdge) {
-            return bitmap;
-        }
-
-        float scale = maxEdge / (float) currentMax;
-        int nextWidth = Math.max(1, Math.round(width * scale));
-        int nextHeight = Math.max(1, Math.round(height * scale));
-        return Bitmap.createScaledBitmap(bitmap, nextWidth, nextHeight, true);
-    }
-
-    private byte[] compressBoundedJpeg(Bitmap source) throws IOException {
-        Bitmap working = source;
-        boolean ownsWorking = false;
-        try {
-            for (int resizePass = 0; resizePass < 6; resizePass += 1) {
-                for (int quality = 84; quality >= 52; quality -= 8) {
-                    ByteArrayOutputStream output = new ByteArrayOutputStream();
-                    if (!working.compress(Bitmap.CompressFormat.JPEG, quality, output)) {
-                        throw new IOException("Could not compress shared image.");
-                    }
-                    byte[] bytes = output.toByteArray();
-                    if (bytes.length <= TARGET_JPEG_BYTES) {
-                        return bytes;
-                    }
-                }
-
-                int maxEdge = Math.max(working.getWidth(), working.getHeight());
-                if (maxEdge <= MIN_OUTPUT_EDGE) {
-                    break;
-                }
-                int nextMaxEdge = Math.max(MIN_OUTPUT_EDGE, Math.round(maxEdge * 0.82f));
-                Bitmap smaller = scaleToMaxEdge(working, nextMaxEdge);
-                if (smaller == working) {
-                    break;
-                }
-                if (ownsWorking) {
-                    working.recycle();
-                }
-                working = smaller;
-                ownsWorking = true;
+        if (streams.size() == 1) {
+            JSONObject image = AndroidImagePayload.fromUri(
+                this,
+                streams.get(0),
+                SINGLE_IMAGE_TARGET_BYTES
+            );
+            image.put("kind", "image");
+            if (!TextUtils.isEmpty(caption)) {
+                image.put("text", caption);
             }
-            throw new IOException("Shared image could not be reduced to a safe transfer size.");
-        } finally {
-            if (ownsWorking && working != source) {
-                working.recycle();
-            }
+            return image.toString();
         }
-    }
 
-    private String displayName(Uri uri) {
-        try (Cursor cursor = getContentResolver().query(
-            uri,
-            new String[]{OpenableColumns.DISPLAY_NAME},
-            null,
-            null,
-            null
-        )) {
-            if (cursor != null && cursor.moveToFirst()) {
-                int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (column >= 0) {
-                    String value = cursor.getString(column);
-                    if (!TextUtils.isEmpty(value)) {
-                        return value;
-                    }
-                }
-            }
-        } catch (RuntimeException ignored) {
-            // Some content providers do not expose OpenableColumns metadata.
+        JSONArray images = new JSONArray();
+        for (Uri stream : streams) {
+            images.put(AndroidImagePayload.fromUri(this, stream, MULTI_IMAGE_TARGET_BYTES));
         }
-        return "shared-image.jpg";
-    }
 
-    private String normalizeJpegName(String name) {
-        String safeName = TextUtils.isEmpty(name) ? "shared-image" : name.trim();
-        int dot = safeName.lastIndexOf('.');
-        if (dot > 0) {
-            safeName = safeName.substring(0, dot);
+        JSONObject payload = new JSONObject();
+        payload.put("kind", "images");
+        payload.put("images", images);
+        if (!TextUtils.isEmpty(caption)) {
+            payload.put("text", caption);
         }
-        return safeName + ".jpg";
+        return payload.toString();
     }
 
     @SuppressWarnings("deprecation")
-    private Uri sharedStreamFromIntent(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
-            return null;
+    private List<Uri> sharedStreamsFromIntent(Intent intent) {
+        List<Uri> result = new ArrayList<>();
+        if (intent == null) {
+            return result;
         }
+
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            Uri stream;
+            if (Build.VERSION.SDK_INT >= 33) {
+                stream = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+            } else {
+                stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            }
+            if (stream != null) result.add(stream);
+            return result;
+        }
+
+        if (!Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            return result;
+        }
+
+        ArrayList<Uri> streams;
         if (Build.VERSION.SDK_INT >= 33) {
-            return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+            streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri.class);
+        } else {
+            streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
         }
-        return intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (streams != null) {
+            result.addAll(streams);
+        }
+        return result;
     }
 }
