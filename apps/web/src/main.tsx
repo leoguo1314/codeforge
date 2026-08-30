@@ -7,9 +7,12 @@ import { Analytics } from "@vercel/analytics/react";
 import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
+import { installAndroidBridge } from "./androidBridge";
 import { isElectron } from "./env";
 import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
+
+installAndroidBridge();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
