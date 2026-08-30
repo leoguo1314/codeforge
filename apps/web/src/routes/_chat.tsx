@@ -4,6 +4,7 @@ import { Outlet, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import ThreadSidebar from "../components/Sidebar";
+import { AndroidDeviceRegistration } from "../components/AndroidDeviceRegistration";
 import { PairAndroidLauncher } from "../components/PairAndroidLauncher";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -116,6 +117,7 @@ function ChatRouteLayout() {
   return (
     <SidebarProvider defaultOpen>
       <ChatRouteGlobalShortcuts />
+      <AndroidDeviceRegistration />
       <Sidebar
         side="left"
         collapsible="offcanvas"
