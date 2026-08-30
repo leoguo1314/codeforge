@@ -10,8 +10,8 @@ android {
         applicationId = "ai.codeforge.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
         manifestPlaceholders["usesCleartextTraffic"] = "false"
     }
 
@@ -33,4 +33,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation("androidx.core:core:1.16.0")
 }
