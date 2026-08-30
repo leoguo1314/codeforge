@@ -58,7 +58,6 @@ import { ServerSettingsPatch } from "./settings";
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
 export const WS_METHODS = {
-  // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
@@ -66,16 +65,10 @@ export const WS_METHODS = {
   projectsWriteFile: "projects.writeFile",
   projectsReadFile: "projects.readFile",
   projectsDeleteFile: "projects.deleteFile",
-
-  // Skills
   skillsList: "skills.list",
   skillsSave: "skills.save",
   skillsDelete: "skills.delete",
-
-  // Shell methods
   shellOpenInEditor: "shell.openInEditor",
-
-  // Git methods
   gitPull: "git.pull",
   gitStatus: "git.status",
   gitRunStackedAction: "git.runStackedAction",
@@ -87,19 +80,13 @@ export const WS_METHODS = {
   gitInit: "git.init",
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
-
-  // Terminal methods
   terminalOpen: "terminal.open",
   terminalWrite: "terminal.write",
   terminalResize: "terminal.resize",
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
-
-  // Thread search
   threadsSearch: "threads.search",
-
-  // Server meta
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -116,22 +103,16 @@ export const WS_CHANNELS = {
   serverConfigUpdated: "server.configUpdated",
   serverProvidersUpdated: "server.providersUpdated",
   streamingTextDelta: "streaming.textDelta",
+  mobileNotification: "mobile.notification",
 } as const;
-
-// -- Tagged Union of all request body schemas ─────────────────────────
 
 const tagRequestBody = <const Tag extends string, const Fields extends Schema.Struct.Fields>(
   tag: Tag,
   schema: Schema.Struct<Fields>,
 ) =>
-  schema.mapFields(
-    Struct.assign({ _tag: Schema.tag(tag) }),
-    // PreserveChecks is safe here. No existing schema should have checks depending on the tag
-    { unsafePreserveChecks: true },
-  );
+  schema.mapFields(Struct.assign({ _tag: Schema.tag(tag) }), { unsafePreserveChecks: true });
 
 const WebSocketRequestBody = Schema.Union([
-  // Orchestration methods
   tagRequestBody(
     ORCHESTRATION_WS_METHODS.dispatchCommand,
     Schema.Struct({ command: ClientOrchestrationCommand }),
@@ -140,22 +121,14 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(ORCHESTRATION_WS_METHODS.getTurnDiff, OrchestrationGetTurnDiffInput),
   tagRequestBody(ORCHESTRATION_WS_METHODS.getFullThreadDiff, OrchestrationGetFullThreadDiffInput),
   tagRequestBody(ORCHESTRATION_WS_METHODS.replayEvents, OrchestrationReplayEventsInput),
-
-  // Project file operations
   tagRequestBody(WS_METHODS.projectsSearchEntries, ProjectSearchEntriesInput),
   tagRequestBody(WS_METHODS.projectsWriteFile, ProjectWriteFileInput),
   tagRequestBody(WS_METHODS.projectsReadFile, ProjectReadFileInput),
   tagRequestBody(WS_METHODS.projectsDeleteFile, ProjectDeleteFileInput),
-
-  // Skills
   tagRequestBody(WS_METHODS.skillsList, SkillsListInput),
   tagRequestBody(WS_METHODS.skillsSave, SkillsSaveInput),
   tagRequestBody(WS_METHODS.skillsDelete, SkillsDeleteInput),
-
-  // Shell methods
   tagRequestBody(WS_METHODS.shellOpenInEditor, OpenInEditorInput),
-
-  // Git methods
   tagRequestBody(WS_METHODS.gitPull, GitPullInput),
   tagRequestBody(WS_METHODS.gitStatus, GitStatusInput),
   tagRequestBody(WS_METHODS.gitRunStackedAction, GitRunStackedActionInput),
@@ -167,19 +140,13 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.gitInit, GitInitInput),
   tagRequestBody(WS_METHODS.gitResolvePullRequest, GitPullRequestRefInput),
   tagRequestBody(WS_METHODS.gitPreparePullRequestThread, GitPreparePullRequestThreadInput),
-
-  // Terminal methods
   tagRequestBody(WS_METHODS.terminalOpen, TerminalOpenInput),
   tagRequestBody(WS_METHODS.terminalWrite, TerminalWriteInput),
   tagRequestBody(WS_METHODS.terminalResize, TerminalResizeInput),
   tagRequestBody(WS_METHODS.terminalClear, TerminalClearInput),
   tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
   tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
-
-  // Thread search
   tagRequestBody(WS_METHODS.threadsSearch, ThreadSearchInput),
-
-  // Server meta
   tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
@@ -196,11 +163,7 @@ export type WebSocketRequest = typeof WebSocketRequest.Type;
 export const WebSocketResponse = Schema.Struct({
   id: TrimmedNonEmptyString,
   result: Schema.optional(Schema.Unknown),
-  error: Schema.optional(
-    Schema.Struct({
-      message: Schema.String,
-    }),
-  ),
+  error: Schema.optional(Schema.Struct({ message: Schema.String })),
 });
 export type WebSocketResponse = typeof WebSocketResponse.Type;
 
@@ -215,11 +178,6 @@ export const WsWelcomePayload = Schema.Struct({
 });
 export type WsWelcomePayload = typeof WsWelcomePayload.Type;
 
-/**
- * Lightweight streaming text delta pushed via the fast path (bypasses the
- * full orchestration pipeline). The client applies it identically to a
- * `thread.message-sent` domain event with `streaming: true`.
- */
 export const StreamingTextDeltaPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -229,6 +187,18 @@ export const StreamingTextDeltaPayload = Schema.Struct({
 });
 export type StreamingTextDeltaPayload = typeof StreamingTextDeltaPayload.Type;
 
+export const MobileNotificationKind = Schema.Literals(["approval", "input", "complete"]);
+export type MobileNotificationKind = typeof MobileNotificationKind.Type;
+
+export const MobileNotificationPayload = Schema.Struct({
+  kind: MobileNotificationKind,
+  threadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  body: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+export type MobileNotificationPayload = typeof MobileNotificationPayload.Type;
+
 export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.serverWelcome]: WsWelcomePayload;
   readonly [WS_CHANNELS.serverConfigUpdated]: typeof ServerConfigUpdatedPayload.Type;
@@ -236,6 +206,7 @@ export interface WsPushPayloadByChannel {
   readonly [WS_CHANNELS.gitActionProgress]: typeof GitActionProgressEvent.Type;
   readonly [WS_CHANNELS.terminalEvent]: typeof TerminalEvent.Type;
   readonly [WS_CHANNELS.streamingTextDelta]: StreamingTextDeltaPayload;
+  readonly [WS_CHANNELS.mobileNotification]: MobileNotificationPayload;
   readonly [ORCHESTRATION_WS_CHANNELS.domainEvent]: OrchestrationEvent;
 }
 
@@ -271,6 +242,10 @@ export const WsPushStreamingTextDelta = makeWsPushSchema(
   WS_CHANNELS.streamingTextDelta,
   StreamingTextDeltaPayload,
 );
+export const WsPushMobileNotification = makeWsPushSchema(
+  WS_CHANNELS.mobileNotification,
+  MobileNotificationPayload,
+);
 export const WsPushOrchestrationDomainEvent = makeWsPushSchema(
   ORCHESTRATION_WS_CHANNELS.domainEvent,
   OrchestrationEvent,
@@ -283,6 +258,7 @@ export const WsPushChannelSchema = Schema.Literals([
   WS_CHANNELS.serverProvidersUpdated,
   WS_CHANNELS.streamingTextDelta,
   WS_CHANNELS.terminalEvent,
+  WS_CHANNELS.mobileNotification,
   ORCHESTRATION_WS_CHANNELS.domainEvent,
 ]);
 export type WsPushChannelSchema = typeof WsPushChannelSchema.Type;
@@ -294,6 +270,7 @@ export const WsPush = Schema.Union([
   WsPushGitActionProgress,
   WsPushStreamingTextDelta,
   WsPushTerminalEvent,
+  WsPushMobileNotification,
   WsPushOrchestrationDomainEvent,
 ]);
 export type WsPush = typeof WsPush.Type;
@@ -307,8 +284,6 @@ export const WsPushEnvelopeBase = Schema.Struct({
   data: Schema.Unknown,
 });
 export type WsPushEnvelopeBase = typeof WsPushEnvelopeBase.Type;
-
-// ── Union of all server → client messages ─────────────────────────────
 
 export const WsResponse = Schema.Union([WebSocketResponse, WsPush]);
 export type WsResponse = typeof WsResponse.Type;
