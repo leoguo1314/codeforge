@@ -10,6 +10,7 @@ import { decodeUnknownJsonResult, formatSchemaError } from "@codeforge/shared/sc
 import { Result, Schema } from "effect";
 
 type PushListener<C extends WsPushChannel> = (message: WsPushMessage<C>) => void;
+type StateListener = (state: TransportState) => void;
 
 interface PendingRequest {
   resolve: (result: unknown) => void;
@@ -25,7 +26,13 @@ interface RequestOptions {
   readonly timeoutMs?: number | null;
 }
 
-type TransportState = "connecting" | "open" | "reconnecting" | "closed" | "disposed";
+export type TransportState =
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "offline"
+  | "closed"
+  | "disposed";
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000];
@@ -77,18 +84,39 @@ function asError(value: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
+function browserIsOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
 export class WsTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly listeners = new Map<string, Set<(message: WsPush) => void>>();
   private readonly latestPushByChannel = new Map<string, WsPush>();
+  private readonly stateListeners = new Set<StateListener>();
   private readonly outboundQueue: string[] = [];
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private state: TransportState = "connecting";
   private readonly url: string;
+  private readonly handleBrowserOnline = () => {
+    if (this.disposed) return;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.setState("open");
+      return;
+    }
+    this.retryNow();
+  };
+  private readonly handleBrowserOffline = () => {
+    if (this.disposed) return;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.setState("offline");
+  };
 
   constructor(url?: string) {
     const bridgeUrl = window.desktopBridge?.getWsUrl();
@@ -100,6 +128,11 @@ export class WsTransport {
         : envUrl && envUrl.length > 0
           ? envUrl
           : resolveBrowserWsUrl(window.location));
+
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("online", this.handleBrowserOnline);
+      window.addEventListener("offline", this.handleBrowserOffline);
+    }
     this.connect();
   }
 
@@ -168,6 +201,20 @@ export class WsTransport {
     };
   }
 
+  subscribeState(listener: StateListener, options?: SubscribeOptions): () => void {
+    this.stateListeners.add(listener);
+    if (options?.replayLatest !== false) {
+      try {
+        listener(this.state);
+      } catch {
+        // State observers are optional UI integrations; never break transport.
+      }
+    }
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
+
   getLatestPush<C extends WsPushChannel>(channel: C): WsPushMessage<C> | null {
     const latest = this.latestPushByChannel.get(channel);
     return latest ? (latest as WsPushMessage<C>) : null;
@@ -177,9 +224,29 @@ export class WsTransport {
     return this.state;
   }
 
+  retryNow(): void {
+    if (this.disposed || this.state === "open" || this.state === "connecting") {
+      return;
+    }
+    if (browserIsOffline()) {
+      this.setState("offline");
+      return;
+    }
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = Math.max(1, this.reconnectAttempt);
+    this.connect();
+  }
+
   dispose() {
     this.disposed = true;
-    this.state = "disposed";
+    if (typeof window.removeEventListener === "function") {
+      window.removeEventListener("online", this.handleBrowserOnline);
+      window.removeEventListener("offline", this.handleBrowserOffline);
+    }
+    this.setState("disposed");
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -194,19 +261,36 @@ export class WsTransport {
     this.outboundQueue.length = 0;
     this.ws?.close();
     this.ws = null;
+    this.stateListeners.clear();
+  }
+
+  private setState(nextState: TransportState): void {
+    if (this.state === nextState) return;
+    this.state = nextState;
+    for (const listener of this.stateListeners) {
+      try {
+        listener(nextState);
+      } catch {
+        // Swallow observer errors; transport state must remain authoritative.
+      }
+    }
   }
 
   private connect() {
     if (this.disposed) {
       return;
     }
+    if (browserIsOffline()) {
+      this.setState("offline");
+      return;
+    }
 
-    this.state = this.reconnectAttempt > 0 ? "reconnecting" : "connecting";
+    this.setState(this.reconnectAttempt > 0 ? "reconnecting" : "connecting");
     const ws = new WebSocket(this.url);
 
     ws.addEventListener("open", () => {
       this.ws = ws;
-      this.state = "open";
+      this.setState("open");
       this.reconnectAttempt = 0;
       this.flushQueue();
     });
@@ -228,10 +312,14 @@ export class WsTransport {
         }
       }
       if (this.disposed) {
-        this.state = "disposed";
+        this.setState("disposed");
         return;
       }
-      this.state = "closed";
+      if (browserIsOffline()) {
+        this.setState("offline");
+        return;
+      }
+      this.setState("closed");
       this.scheduleReconnect();
     });
 
@@ -322,7 +410,12 @@ export class WsTransport {
     if (this.disposed || this.reconnectTimer !== null) {
       return;
     }
+    if (browserIsOffline()) {
+      this.setState("offline");
+      return;
+    }
 
+    this.setState("reconnecting");
     const delay =
       RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)] ??
       RECONNECT_DELAYS_MS[0]!;
