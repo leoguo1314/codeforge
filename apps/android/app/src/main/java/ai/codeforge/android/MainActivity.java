@@ -1,12 +1,18 @@
 package ai.codeforge.android;
 
+import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -15,6 +21,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -30,20 +37,26 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 import java.util.Locale;
 
 /**
- * Thin Android workspace client for CodeForge.
+ * Android workspace client for CodeForge.
  *
  * Agent runtimes, Git, Terminal, Skills, persistence, and orchestration stay on
- * the remote CodeForge Server. This activity only hosts the existing web UI,
- * persists the server profile, and supplies Android-native file selection.
+ * the remote CodeForge Server. Android supplies the mobile shell, secure remote
+ * connection profile, native shares, pairing deep links, file selection, and
+ * background notifications.
  */
 public final class MainActivity extends Activity {
     private static final String PREFS = "codeforge_android";
     private static final String PREF_SERVER_URL = "server_url";
     private static final String PREF_AUTH_TOKEN = "auth_token";
+    private static final String NOTIFICATION_CHANNEL_ID = "codeforge_agent_events";
+
     private static final int FILE_CHOOSER_REQUEST = 7001;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 7002;
 
     private static final int MENU_RELOAD = 1;
     private static final int MENU_CHANGE_CONNECTION = 2;
@@ -56,13 +69,24 @@ public final class MainActivity extends Activity {
     private ValueCallback<Uri[]> pendingFileChooser;
     private String currentServerUrl;
     private String currentAuthToken;
+    private String pendingSharedText;
+    private boolean foreground;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        createNotificationChannel();
+        requestNotificationPermissionIfNeeded();
         setContentView(createRootView());
+
+        enqueueIncomingShare(getIntent());
+        PairingRequest pairingRequest = pairingRequestFromIntent(getIntent());
+        if (pairingRequest != null) {
+            connect(pairingRequest.serverUrl, pairingRequest.authToken, true);
+            return;
+        }
 
         String savedServerUrl = preferences.getString(PREF_SERVER_URL, "");
         String savedAuthToken = preferences.getString(PREF_AUTH_TOKEN, "");
@@ -71,6 +95,34 @@ public final class MainActivity extends Activity {
         } else {
             showConnectionForm(null);
         }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+
+        PairingRequest pairingRequest = pairingRequestFromIntent(intent);
+        if (pairingRequest != null) {
+            connect(pairingRequest.serverUrl, pairingRequest.authToken, true);
+            return;
+        }
+
+        if (enqueueIncomingShare(intent)) {
+            dispatchPendingSharedText();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        foreground = true;
+    }
+
+    @Override
+    protected void onPause() {
+        foreground = false;
+        super.onPause();
     }
 
     private View createRootView() {
@@ -294,6 +346,9 @@ public final class MainActivity extends Activity {
         if (!scheme.equals("https") && !scheme.equals("http")) {
             throw new IllegalArgumentException("Server URL must use HTTPS or HTTP.");
         }
+        if (scheme.equals("http") && !BuildConfig.DEBUG) {
+            throw new IllegalArgumentException("Release builds require HTTPS.");
+        }
         if (TextUtils.isEmpty(uri.getHost())) {
             throw new IllegalArgumentException("Server URL must include a valid host.");
         }
@@ -352,9 +407,10 @@ public final class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSafeBrowsingEnabled(true);
-        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.1");
+        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.2");
         CookieManager.getInstance().setAcceptCookie(true);
 
+        view.addJavascriptInterface(new AndroidJavascriptBridge(), "CodeForgeAndroid");
         view.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -364,6 +420,16 @@ public final class MainActivity extends Activity {
                 }
                 openExternal(target);
                 return true;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                view.evaluateJavascript(
+                    "document.documentElement.classList.add('codeforge-android'); true;",
+                    null
+                );
+                dispatchPendingSharedText();
             }
         });
 
@@ -393,6 +459,66 @@ public final class MainActivity extends Activity {
         return view;
     }
 
+    private boolean enqueueIncomingShare(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
+            return false;
+        }
+        CharSequence shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        if (shared == null) {
+            return false;
+        }
+        String text = shared.toString().trim();
+        if (text.isEmpty()) {
+            return false;
+        }
+        pendingSharedText = TextUtils.isEmpty(pendingSharedText)
+            ? text
+            : pendingSharedText + "\n\n" + text;
+        return true;
+    }
+
+    private void dispatchPendingSharedText() {
+        if (webView == null || TextUtils.isEmpty(pendingSharedText)) {
+            return;
+        }
+        String textToDispatch = pendingSharedText;
+        String javascript =
+            "(() => {" +
+            " if (typeof window.__codeforgeReceiveSharedText !== 'function') return false;" +
+            " window.__codeforgeReceiveSharedText(" + JSONObject.quote(textToDispatch) + ");" +
+            " return true;" +
+            "})()";
+        webView.evaluateJavascript(javascript, result -> {
+            if ("true".equals(result) && TextUtils.equals(pendingSharedText, textToDispatch)) {
+                pendingSharedText = null;
+                return;
+            }
+            if (!TextUtils.isEmpty(pendingSharedText) && webView != null) {
+                webView.postDelayed(this::dispatchPendingSharedText, 300);
+            }
+        });
+    }
+
+    private PairingRequest pairingRequestFromIntent(Intent intent) {
+        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) {
+            return null;
+        }
+        Uri data = intent.getData();
+        if (data == null || !"codeforge".equalsIgnoreCase(data.getScheme())) {
+            return null;
+        }
+        if (!"connect".equalsIgnoreCase(data.getHost())) {
+            return null;
+        }
+        String serverUrl = data.getQueryParameter("server");
+        if (TextUtils.isEmpty(serverUrl)) {
+            Toast.makeText(this, "Pairing link is missing the server address.", Toast.LENGTH_SHORT).show();
+            return null;
+        }
+        String authToken = data.getQueryParameter("token");
+        return new PairingRequest(serverUrl, authToken == null ? "" : authToken);
+    }
+
     private boolean isCurrentServerUri(Uri target) {
         if (currentServerUrl == null) {
             return false;
@@ -416,6 +542,84 @@ public final class MainActivity extends Activity {
             startActivity(new Intent(Intent.ACTION_VIEW, uri));
         } catch (ActivityNotFoundException error) {
             Toast.makeText(this, "No app can open this link.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void createNotificationChannel() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) {
+            return;
+        }
+        NotificationChannel channel = new NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "CodeForge agent events",
+            NotificationManager.IMPORTANCE_DEFAULT
+        );
+        channel.setDescription("Approvals, user-input requests, and completed agent turns.");
+        manager.createNotificationChannel(channel);
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        requestPermissions(
+            new String[]{Manifest.permission.POST_NOTIFICATIONS},
+            NOTIFICATION_PERMISSION_REQUEST
+        );
+    }
+
+    private void postAgentNotification(String kind, String title, String body) {
+        if (foreground) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) {
+            return;
+        }
+
+        Intent openIntent = new Intent(this, MainActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        Notification notification = new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_more)
+            .setContentTitle(TextUtils.isEmpty(title) ? "CodeForge" : title)
+            .setContentText(TextUtils.isEmpty(body) ? kind : body)
+            .setStyle(new Notification.BigTextStyle().bigText(TextUtils.isEmpty(body) ? kind : body))
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .build();
+        manager.notify((int) (System.currentTimeMillis() & 0x7fffffff), notification);
+    }
+
+    private final class AndroidJavascriptBridge {
+        @JavascriptInterface
+        public void notify(String kind, String title, String body) {
+            runOnUiThread(() -> postAgentNotification(kind, title, body));
+        }
+    }
+
+    private static final class PairingRequest {
+        private final String serverUrl;
+        private final String authToken;
+
+        private PairingRequest(String serverUrl, String authToken) {
+            this.serverUrl = serverUrl;
+            this.authToken = authToken;
         }
     }
 
@@ -447,6 +651,7 @@ public final class MainActivity extends Activity {
         }
         if (webView != null) {
             webView.stopLoading();
+            webView.removeJavascriptInterface("CodeForgeAndroid");
             webView.loadUrl("about:blank");
             webView.clearHistory();
             webView.removeAllViews();
