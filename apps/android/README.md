@@ -77,7 +77,7 @@ Offline
 Immediate reconnect
 ```
 
-The Android toolbar displays `Connecting`, `Connected`, `Reconnecting`, or `Offline` using the Web transport's authoritative state. Normal reconnects retain the existing 0.5s / 1s / 2s / 4s / 8s backoff. When the browser reports the network is offline, CodeForge stops pointless reconnect timers; when connectivity returns it retries immediately rather than waiting for the previous backoff window.
+The Android toolbar displays `Connecting`, `Connected`, `Reconnecting`, or `Offline` using the Web transport's authoritative state. Normal reconnects retain the existing 0.5s / 1s / 2s / 4s / 8s backoff. When the browser reports the network is offline, CodeForge stops pointless reconnect timers and closes a stale socket; when connectivity returns it retries immediately rather than waiting for the previous backoff window.
 
 ## Android Share
 
@@ -117,7 +117,7 @@ The full-resolution source photo is captured into the app's private cache direct
 
 ## v0.5 mobile notification contract
 
-The Server now emits a provider-neutral WebSocket channel:
+The Server emits a provider-neutral WebSocket channel:
 
 ```text
 mobile.notification
@@ -141,7 +141,28 @@ It is derived only from durable/live orchestration facts:
 
 Using turn-diff completion avoids guessing completion from transient provider/session `ready` states.
 
-This is the delivery-neutral foundation for FCM, Huawei Push Kit, APNs relays, or an enterprise push gateway. v0.5 does **not** commit Firebase credentials or pretend the current local WebView notification mechanism is guaranteed push. The existing Android local notifications still work while the live WebView receives events; reliable app-killed delivery requires a push adapter and device-token registration in a subsequent version.
+The live Android notification path now consumes this canonical server channel directly:
+
+```text
+Orchestration Event
+        |
+        v
+Server PushBus
+        |
+        +--> orchestration.domainEvent
+        |
+        `--> mobile.notification
+                    |
+                    v
+              Web WsTransport
+                    |
+                    v
+          Android native notification
+```
+
+The previous Android-side notification inference from projected thread state has been removed, so a future FCM/Huawei Push/enterprise delivery adapter can use the same `mobile.notification` semantics without duplicating approval/input/completion rules.
+
+v0.5 does **not** commit Firebase credentials or claim guaranteed app-killed push. Local notifications require the live WebView/WebSocket path to receive the server event. Reliable notification delivery after Android suspends or kills the app still requires device registration plus a server push-delivery adapter in a later version.
 
 ## Security model
 
@@ -174,14 +195,14 @@ For Internet-facing deployment, place the whole CodeForge endpoint behind TLS pl
 - FIFO native share delivery
 - native connection-state toolbar
 - network-aware immediate reconnect
-- local approval/input/completion notifications
+- server-driven local approval/input/completion notifications
 - normalized Server `mobile.notification` channel
 - `codeforge://connect` pairing + built-in offline QR
 
 ## Next increments
 
 1. Add a push-delivery adapter interface and device registration flow; then implement FCM and/or Huawei Push Kit without changing orchestration semantics.
-2. Replace long-lived token-bearing QR links with expiring, single-use pairing codes.
+2. Replace long-lived token-bearing QR links with expiring, single-use device pairing codes.
 3. Add Android-specific Chat / Terminal / Diff touch-density and gesture improvements.
 4. Design first-class generic document/file attachments instead of overloading image transport.
 5. Add stronger HTTP/session authentication for non-private-network deployments.
