@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { ANDROID_SHARE_PREFIX, parseAndroidSharedPayload } from "./androidBridge";
+import {
+  ANDROID_SHARE_PREFIX,
+  getOrCreateAndroidDeviceId,
+  parseAndroidSharedPayload,
+} from "./androidBridge";
 
 describe("parseAndroidSharedPayload", () => {
   it("normalizes ordinary shared text", () => {
@@ -106,5 +110,22 @@ describe("parseAndroidSharedPayload", () => {
         ANDROID_SHARE_PREFIX + JSON.stringify({ kind: "file", name: "archive.zip" }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("Android installation identity", () => {
+  it("persists one stable id instead of minting a new device per registration", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+
+    const first = getOrCreateAndroidDeviceId(storage);
+    const second = getOrCreateAndroidDeviceId(storage);
+
+    expect(first).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(second).toBe(first);
+    expect(values.size).toBe(1);
   });
 });
