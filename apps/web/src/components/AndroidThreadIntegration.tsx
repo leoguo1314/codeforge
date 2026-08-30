@@ -1,19 +1,30 @@
-import type { ThreadId } from "@codeforge/contracts";
+import {
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  type ThreadId,
+} from "@codeforge/contracts";
 import { useEffect, useMemo, useRef } from "react";
 
 import {
-  consumePendingAndroidSharedText,
+  type AndroidSharedPayload,
+  consumePendingAndroidShares,
   isAndroidApp,
   notifyAndroid,
-  onAndroidSharedText,
+  onAndroidShare,
 } from "../androidBridge";
-import { useComposerDraftStore, useComposerThreadDraft } from "../composerDraftStore";
+import {
+  type ComposerImageAttachment,
+  useComposerDraftStore,
+  useComposerThreadDraft,
+} from "../composerDraftStore";
+import { randomUUID } from "../lib/utils";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
   isLatestTurnSettled,
 } from "../session-logic";
 import { useStore } from "../store";
+import { toastManager } from "./ui/toast";
 
 type NotificationSnapshot = {
   approvalCount: number;
@@ -22,10 +33,25 @@ type NotificationSnapshot = {
   latestTurnSettled: boolean;
 };
 
+const dataUrlToFile = (dataUrl: string, name: string, mimeType: string): File => {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex <= 0 || !dataUrl.slice(0, commaIndex).includes(";base64")) {
+    throw new Error("Android shared image is not base64 encoded.");
+  }
+
+  const binary = window.atob(dataUrl.slice(commaIndex + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new File([bytes], name, { type: mimeType });
+};
+
 export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
   const thread = useStore((store) => store.threads.find((candidate) => candidate.id === threadId));
   const composerDraft = useComposerThreadDraft(threadId);
   const setPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const addImage = useComposerDraftStore((store) => store.addImage);
   const promptRef = useRef(composerDraft.prompt);
   promptRef.current = composerDraft.prompt;
 
@@ -48,15 +74,69 @@ export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
       setPrompt(threadId, nextPrompt);
     };
 
+    const applySharedPayload = (payload: AndroidSharedPayload) => {
+      if (payload.kind === "text") {
+        appendSharedText(payload.text);
+        return;
+      }
+
+      if (inputCount > 0) {
+        toastManager.add({
+          type: "warning",
+          title: "Finish the pending agent questions first",
+          description: "The shared image was not attached.",
+        });
+        return;
+      }
+
+      try {
+        const file = dataUrlToFile(payload.dataUrl, payload.name, payload.mimeType);
+        if (!file.type.startsWith("image/")) {
+          throw new Error("Android shared attachment is not an image.");
+        }
+        if (file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          throw new Error("Android shared image exceeds the CodeForge attachment size limit.");
+        }
+
+        const currentImages =
+          useComposerDraftStore.getState().draftsByThreadId[threadId]?.images ?? [];
+        if (currentImages.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+          throw new Error(
+            `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`,
+          );
+        }
+
+        const image: ComposerImageAttachment = {
+          type: "image",
+          id: randomUUID(),
+          name: file.name || "image",
+          mimeType: file.type,
+          sizeBytes: file.size,
+          previewUrl: URL.createObjectURL(file),
+          file,
+        };
+        addImage(threadId, image);
+        if (payload.text) {
+          appendSharedText(payload.text);
+        }
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not attach Android shared image",
+          description: error instanceof Error ? error.message : "Invalid shared image payload.",
+        });
+      }
+    };
+
     const drainPendingShares = () => {
-      for (const text of consumePendingAndroidSharedText()) {
-        appendSharedText(text);
+      for (const payload of consumePendingAndroidShares()) {
+        applySharedPayload(payload);
       }
     };
 
     drainPendingShares();
-    return onAndroidSharedText(() => drainPendingShares());
-  }, [setPrompt, threadId]);
+    return onAndroidShare(() => drainPendingShares());
+  }, [addImage, inputCount, setPrompt, threadId]);
 
   const previousSnapshotRef = useRef<NotificationSnapshot | null>(null);
   useEffect(() => {
