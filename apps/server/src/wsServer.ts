@@ -59,6 +59,8 @@ import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry";
 import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
 import { ThreadSearchIndex } from "./persistence/Services/ThreadSearchIndex";
+import { MobileDeviceRegistry } from "./mobile/Services/MobileDeviceRegistry";
+import { PushDeliveryService } from "./mobile/Services/PushDelivery";
 import { clamp } from "effect/Number";
 import { Open, resolveAvailableEditors } from "./open";
 import { ServerConfig } from "./config";
@@ -224,6 +226,8 @@ export type ServerRuntimeServices =
   | TerminalManager
   | Keybindings
   | ServerSettingsService
+  | MobileDeviceRegistry
+  | PushDeliveryService
   | Open
   | AnalyticsService;
 
@@ -263,6 +267,8 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const keybindingsManager = yield* Keybindings;
   const serverSettingsManager = yield* ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry;
+  const mobileDeviceRegistry = yield* MobileDeviceRegistry;
+  const pushDelivery = yield* PushDeliveryService;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -296,6 +302,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const pushBus = yield* makeServerPushBus({
     clients,
     logOutgoingPush,
+    enqueueMobileNotification: (notification) => pushDelivery.enqueue(notification),
   });
   yield* readiness.markPushBusReady;
   yield* keybindingsManager.start.pipe(
@@ -1084,6 +1091,31 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.terminalClose: {
         const body = stripRequestTag(request.body);
         return yield* terminalManager.close(body);
+      }
+
+      case WS_METHODS.mobileRegisterDevice: {
+        const body = stripRequestTag(request.body);
+        const registration = yield* mobileDeviceRegistry.register(body);
+        return { registration };
+      }
+
+      case WS_METHODS.mobileUnregisterDevice: {
+        const body = stripRequestTag(request.body);
+        yield* mobileDeviceRegistry.unregister(body.deviceId);
+        return { deviceId: body.deviceId };
+      }
+
+      case WS_METHODS.mobileGetPushStatus: {
+        const body = stripRequestTag(request.body);
+        const registration = yield* mobileDeviceRegistry.get(body.deviceId);
+        const server = yield* pushDelivery.getStatus();
+        return { registration, server };
+      }
+
+      case WS_METHODS.mobileSendTestNotification: {
+        const body = stripRequestTag(request.body);
+        const queued = yield* pushDelivery.sendTest(body.deviceId);
+        return { queued };
       }
 
       case WS_METHODS.serverGetConfig: {
