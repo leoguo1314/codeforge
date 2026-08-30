@@ -1,5 +1,8 @@
 import {
+  ORCHESTRATION_WS_CHANNELS,
+  WS_CHANNELS,
   WsPush,
+  type OrchestrationEvent,
   type WsPushChannel,
   type WsPushData,
   type WsPushEnvelopeBase,
@@ -7,6 +10,8 @@ import {
 import { Deferred, Effect, Queue, Ref, Schema } from "effect";
 import type { Scope } from "effect";
 import type { WebSocket } from "ws";
+
+import { mobileNotificationFromEvent } from "./mobileNotifications.ts";
 
 type PushTarget =
   | { readonly kind: "all" }
@@ -97,8 +102,21 @@ export const makeServerPushBus = (input: {
           delivered: null,
         }).pipe(Effect.asVoid);
 
+    const publishAllBase = publish({ kind: "all" });
+
+    const publishAll: ServerPushBus["publishAll"] = (channel, data) =>
+      Effect.gen(function* () {
+        yield* publishAllBase(channel, data);
+        if (channel !== ORCHESTRATION_WS_CHANNELS.domainEvent) return;
+
+        const notification = mobileNotificationFromEvent(data as OrchestrationEvent);
+        if (notification) {
+          yield* publishAllBase(WS_CHANNELS.mobileNotification, notification);
+        }
+      });
+
     return {
-      publishAll: publish({ kind: "all" }),
+      publishAll,
       publishClient: (client, channel, data) =>
         Effect.gen(function* () {
           const delivered = yield* Deferred.make<boolean>();
