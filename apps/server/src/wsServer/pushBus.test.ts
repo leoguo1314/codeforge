@@ -4,6 +4,7 @@ import { Effect, Ref } from "effect";
 import {
   ORCHESTRATION_WS_CHANNELS,
   WS_CHANNELS,
+  type MobileNotificationPayload,
   type OrchestrationEvent,
 } from "@codeforge/contracts";
 
@@ -91,14 +92,19 @@ describe("makeServerPushBus", () => {
     );
   });
 
-  it("fans durable turn completion into a normalized mobile notification", async () => {
+  it("fans durable turn completion into live and background mobile delivery", async () => {
     await runScoped(
       Effect.gen(function* () {
         const client = new MockWebSocket();
         const clients = yield* Ref.make(new Set<WebSocket>([client as unknown as WebSocket]));
+        const enqueued: MobileNotificationPayload[] = [];
         const pushBus = yield* makeServerPushBus({
           clients,
           logOutgoingPush: () => {},
+          enqueueMobileNotification: (notification) =>
+            Effect.sync(() => {
+              enqueued.push(notification);
+            }),
         });
 
         const event = {
@@ -144,6 +150,12 @@ describe("makeServerPushBus", () => {
           threadId: "thread-mobile",
           title: "Agent turn completed",
           createdAt: "2026-08-31T00:00:03.000Z",
+        });
+        expect(enqueued).toHaveLength(1);
+        expect(enqueued[0]).toMatchObject({
+          kind: "complete",
+          threadId: "thread-mobile",
+          title: "Agent turn completed",
         });
       }),
     );
