@@ -4,16 +4,21 @@ export const ANDROID_SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
 
 export type AndroidNotificationKind = "approval" | "complete" | "input" | "info";
 
+export type AndroidSharedImage = {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
 export type AndroidSharedPayload =
   | {
       kind: "text";
       text: string;
     }
+  | ({ kind: "image"; text?: string } & AndroidSharedImage)
   | {
-      kind: "image";
-      name: string;
-      mimeType: string;
-      dataUrl: string;
+      kind: "images";
+      images: AndroidSharedImage[];
       text?: string;
     };
 
@@ -35,6 +40,18 @@ function normalizeSharedText(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+function parseSharedImage(value: unknown): AndroidSharedImage | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const name = normalizeSharedText(record.name);
+  const mimeType = normalizeSharedText(record.mimeType);
+  const dataUrl = normalizeSharedText(record.dataUrl);
+  if (!name || !mimeType?.startsWith("image/") || !dataUrl?.startsWith("data:image/")) {
+    return null;
+  }
+  return { name, mimeType, dataUrl };
+}
+
 export function parseAndroidSharedPayload(rawValue: unknown): AndroidSharedPayload | null {
   const rawText = normalizeSharedText(rawValue);
   if (!rawText) return null;
@@ -47,23 +64,30 @@ export function parseAndroidSharedPayload(rawValue: unknown): AndroidSharedPaylo
     const parsed = JSON.parse(rawText.slice(ANDROID_SHARE_PREFIX.length)) as unknown;
     if (!parsed || typeof parsed !== "object") return null;
     const record = parsed as Record<string, unknown>;
-    if (record.kind !== "image") return null;
-
-    const name = normalizeSharedText(record.name);
-    const mimeType = normalizeSharedText(record.mimeType);
-    const dataUrl = normalizeSharedText(record.dataUrl);
     const text = normalizeSharedText(record.text);
-    if (!name || !mimeType?.startsWith("image/") || !dataUrl?.startsWith("data:image/")) {
-      return null;
+
+    if (record.kind === "image") {
+      const image = parseSharedImage(record);
+      if (!image) return null;
+      return {
+        kind: "image",
+        ...image,
+        ...(text ? { text } : {}),
+      };
     }
 
-    return {
-      kind: "image",
-      name,
-      mimeType,
-      dataUrl,
-      ...(text ? { text } : {}),
-    };
+    if (record.kind === "images") {
+      if (!Array.isArray(record.images) || record.images.length === 0) return null;
+      const images = record.images.map(parseSharedImage);
+      if (images.some((image) => image === null)) return null;
+      return {
+        kind: "images",
+        images: images as AndroidSharedImage[],
+        ...(text ? { text } : {}),
+      };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -103,7 +127,7 @@ export function onAndroidShare(listener: (payload: AndroidSharedPayload) => void
   const handler = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
     const payload = event.detail as AndroidSharedPayload | undefined;
-    if (!payload || (payload.kind !== "text" && payload.kind !== "image")) return;
+    if (!payload || !["text", "image", "images"].includes(payload.kind)) return;
     listener(payload);
   };
 
