@@ -2,6 +2,7 @@ import { ThreadId } from "@codeforge/contracts";
 import { createFileRoute, retainSearchParams, useNavigate } from "@tanstack/react-router";
 import { Suspense, lazy, type ReactNode, useCallback, useEffect, useState } from "react";
 
+import { AndroidThreadIntegration } from "../components/AndroidThreadIntegration";
 import ChatView from "../components/ChatView";
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
 import {
@@ -234,6 +235,7 @@ function ChatThreadRouteView() {
   if (!shouldUseDiffSheet) {
     return (
       <>
+        <AndroidThreadIntegration threadId={threadId} />
         <SidebarInset className="h-dvh  min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
           <ChatView key={threadId} threadId={threadId} />
         </SidebarInset>
@@ -249,6 +251,7 @@ function ChatThreadRouteView() {
 
   return (
     <>
+      <AndroidThreadIntegration threadId={threadId} />
       <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
         <ChatView key={threadId} threadId={threadId} />
       </SidebarInset>
