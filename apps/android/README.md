@@ -1,6 +1,6 @@
 # CodeForge Android
 
-CodeForge Android is a thin mobile workspace client. Node.js, Codex CLI, Claude Agent SDK, Git, PTY, orchestration, and persistence continue to run on the normal CodeForge Server host; Android provides the mobile shell, remote connection, native sharing/camera integration, and notifications.
+CodeForge Android is a thin mobile workspace client. Node.js, Codex CLI, Claude Agent SDK, Git, PTY, orchestration, and persistence continue to run on the normal CodeForge Server host; Android provides the mobile shell, remote connection, native sharing/camera integration, connection state, and notifications.
 
 ```text
 Android App (native shell + WebView)
@@ -12,7 +12,8 @@ CodeForge Server
   |- Claude / Codex Provider Adapters
   |- Git / Worktree
   |- Terminal / PTY
-  `- Skills / Project Files
+  |- Skills / Project Files
+  `- Mobile Device Registry / Push Delivery
 ```
 
 ## Build
@@ -57,9 +58,9 @@ codeforge://connect?server=<URL_ENCODED_SERVER>&token=<URL_ENCODED_TOKEN>
 
 The QR Model 2 encoder is implemented inside CodeForge and does not call an external QR service. Treat the QR/link as a credential while it contains the long-lived auth token. A future production pairing flow should replace this with short-lived, single-use device pairing codes.
 
-## v0.5 connection lifecycle
+## Connection lifecycle
 
-v0.5 exposes the real WebSocket lifecycle to the Android native shell:
+The Android toolbar displays the WebSocket transport's real lifecycle:
 
 ```text
 Connecting -> Connected
@@ -77,9 +78,9 @@ Offline
 Immediate reconnect
 ```
 
-The Android toolbar displays `Connecting`, `Connected`, `Reconnecting`, or `Offline` using the Web transport's authoritative state. Normal reconnects retain the existing 0.5s / 1s / 2s / 4s / 8s backoff. When the browser reports the network is offline, CodeForge stops pointless reconnect timers and closes a stale socket; when connectivity returns it retries immediately rather than waiting for the previous backoff window.
+Normal reconnects retain the existing 0.5s / 1s / 2s / 4s / 8s backoff. When the browser reports the network is offline, CodeForge stops pointless reconnect timers and closes a stale socket; when connectivity returns it retries immediately.
 
-## Android Share
+## Android Share and Camera
 
 Shared material always becomes a Composer draft and is never auto-sent or auto-executed.
 
@@ -88,36 +89,13 @@ Supported inputs:
 - `text/*`: text and URLs append to the current Composer
 - `image/*` + `ACTION_SEND`: single image
 - `image/*` + `ACTION_SEND_MULTIPLE`: up to four images
+- `Camera -> Composer`: full-resolution private capture source
 
-Images are decoded with bounded sampling, resized/compressed for a safe Intent/WebView transfer budget, then converted into normal `ComposerImageAttachment` objects. Existing CodeForge preview, draft persistence, attachment limits, and send-turn behavior are reused.
+Camera capture uses Android `FileProvider` with a private `cache/camera/` staging file. The full-resolution source is normalized into a bounded Composer image payload and the staging file is deleted after conversion. No external-storage permission is required.
 
-Native-to-Web delivery uses a FIFO queue. Each text/image/camera event is removed only after the page confirms its Android bridge accepted it.
+## Canonical mobile notification contract
 
-## v0.5 full-resolution Camera -> Composer
-
-`Camera -> Composer` now uses the Android `FileProvider` output path instead of relying on the camera app's thumbnail result:
-
-```text
-System Camera
-     |
-     | MediaStore.EXTRA_OUTPUT
-     v
-private cache FileProvider URI
-     |
-     | full-resolution JPEG source
-     v
-AndroidImagePayload normalization
-     |
-     | bounded JPEG/data URL
-     v
-CodeForge Composer
-```
-
-The full-resolution source photo is captured into the app's private cache directory. No external-storage permission is required. After CodeForge creates the bounded Composer payload, the staging image is deleted. The Agent receives the normalized attachment rather than an unbounded full-resolution Binder/WebView payload.
-
-## v0.5 mobile notification contract
-
-The Server emits a provider-neutral WebSocket channel:
+The Server emits one provider-neutral notification vocabulary:
 
 ```text
 mobile.notification
@@ -126,14 +104,14 @@ mobile.notification
 Payload:
 
 ```text
-kind: approval | input | complete
-threadId
+kind: approval | input | complete | info
+threadId: thread id | null
 title
 body
 createdAt
 ```
 
-It is derived only from durable/live orchestration facts:
+Agent notifications are derived from durable/live orchestration facts:
 
 - `approval.requested` -> `approval`
 - `user-input.requested` -> `input`
@@ -141,7 +119,57 @@ It is derived only from durable/live orchestration facts:
 
 Using turn-diff completion avoids guessing completion from transient provider/session `ready` states.
 
-The live Android notification path now consumes this canonical server channel directly:
+## v0.6 device registration
+
+v0.6 adds a provider-neutral installation registry. The Android Web client creates one stable installation ID and refreshes the registration whenever the WebSocket opens.
+
+```text
+Android installation
+        |
+        | mobile.registerDevice
+        v
+CodeForge Server
+        |
+        v
+SQLite: mobile_push_devices
+```
+
+Each registration contains:
+
+```text
+deviceId
+platform: android
+pushProvider: none | fcm | huawei | gateway
+pushToken: opaque token | null
+appVersion
+deviceLabel
+registeredAt
+updatedAt
+```
+
+The stock v0.6 client currently registers as:
+
+```text
+pushProvider = none
+pushToken    = null
+```
+
+That is intentional. v0.6 establishes the device identity, persistence, RPC, and delivery boundary without embedding Firebase or Huawei credentials. A future native FCM/Huawei provider can return its opaque token through the existing bridge and update the same device registration without changing Orchestration semantics.
+
+The registration RPCs are:
+
+```text
+mobile.registerDevice
+mobile.unregisterDevice
+mobile.getPushStatus
+mobile.sendTestNotification
+```
+
+`mobile.getPushStatus` reports both the current device record and Server delivery status, including registered-device and push-capable-device counts.
+
+## v0.6 background Push Delivery Adapter
+
+The real-time and background paths now fan out from the same canonical notification:
 
 ```text
 Orchestration Event
@@ -149,30 +177,86 @@ Orchestration Event
         v
 Server PushBus
         |
-        +--> orchestration.domainEvent
+        +--> mobile.notification
+        |        |
+        |        v
+        |   live WebSocket
+        |        |
+        |        v
+        |   Android local notification
         |
-        `--> mobile.notification
-                    |
-                    v
-              Web WsTransport
-                    |
-                    v
-          Android native notification
+        `--> PushDeliveryService queue
+                 |
+                 v
+          Push Delivery Adapter
+                 |
+                 v
+        external push gateway
+                 |
+          +------+------+
+          |             |
+         FCM        Huawei Push Kit
+          |             |
+          +------+------+
+                 |
+                 v
+              Android
 ```
 
-The previous Android-side notification inference from projected thread state has been removed, so a future FCM/Huawei Push/enterprise delivery adapter can use the same `mobile.notification` semantics without duplicating approval/input/completion rules.
+The first executable delivery adapter is a generic HTTP Push Gateway. Configure it on the CodeForge Server host:
 
-v0.5 does **not** commit Firebase credentials or claim guaranteed app-killed push. Local notifications require the live WebView/WebSocket path to receive the server event. Reliable notification delivery after Android suspends or kills the app still requires device registration plus a server push-delivery adapter in a later version.
+```bash
+export CODEFORGE_PUSH_GATEWAY_URL="https://push.example.internal/codeforge"
+export CODEFORGE_PUSH_GATEWAY_TOKEN="REPLACE_WITH_GATEWAY_BEARER_TOKEN"
+```
+
+These variables are explicitly passed through the repository's Turbo runtime environment.
+
+When configured, CodeForge POSTs one request per push-capable device:
+
+```json
+{
+  "version": 1,
+  "device": {
+    "deviceId": "installation-id",
+    "platform": "android",
+    "pushProvider": "fcm",
+    "pushToken": "opaque-provider-token",
+    "appVersion": "0.6.0",
+    "deviceLabel": "Android device"
+  },
+  "notification": {
+    "kind": "approval",
+    "threadId": "thread-id",
+    "title": "Approval required",
+    "body": "CodeForge agent needs approval.",
+    "createdAt": "2026-08-31T00:00:00.000Z"
+  }
+}
+```
+
+The gateway is responsible for translating the opaque provider/token pair into its FCM, Huawei Push Kit, or enterprise push call. This keeps cloud-vendor SDKs and credentials out of the CodeForge orchestration core.
+
+If `CODEFORGE_PUSH_GATEWAY_URL` is absent, the Server reports the adapter as `disabled`. Device registration still works, but `mobile.sendTestNotification` does not claim that a background notification was queued.
+
+### Delivery semantics in v0.6
+
+The Push Delivery queue is deliberately asynchronous, so network latency or a failing push gateway cannot block Orchestration or WebSocket delivery. Gateway calls have a bounded timeout and failures are logged without logging push tokens.
+
+The queue is currently **in-memory**, not a durable outbox. Therefore v0.6 background delivery is best-effort: a Server process crash between event creation and gateway delivery can lose a queued notification. A durable notification outbox with retry/backoff/dead-letter semantics is a later hardening step.
 
 ## Security model
 
 - WebSocket RPC uses the existing `--auth-token` check.
 - Release APKs require HTTPS/WSS; Debug may use LAN HTTP.
 - Provider credentials stay on the CodeForge Server host.
+- Push tokens stay in the Server's local SQLite device registry and are not placed in the Orchestration Event Store.
+- Push tokens are not written to delivery logs.
+- Push-gateway bearer credentials come from environment variables, not the repository.
+- Production push gateways should use HTTPS and a private/authenticated network path.
 - External links leave the CodeForge WebView.
-- The JavaScript bridge is deliberately narrow: agent notification + connection-state display. It is not a generic native command executor.
+- The JavaScript bridge remains narrow; it is not a generic native command executor.
 - FileProvider exposes only private `cache/camera/` files and grants temporary URI access to the selected camera app.
-- Camera staging files are deleted after payload creation.
 - Shared content enters the Composer as drafts and never auto-executes.
 - Multi-image share is capped at four images.
 - Pairing QR generation remains local.
@@ -196,13 +280,19 @@ For Internet-facing deployment, place the whole CodeForge endpoint behind TLS pl
 - native connection-state toolbar
 - network-aware immediate reconnect
 - server-driven local approval/input/completion notifications
-- normalized Server `mobile.notification` channel
+- canonical `mobile.notification` semantics
+- persistent Android installation registration
+- SQLite mobile device registry
+- push status/test RPCs
+- asynchronous PushDeliveryService
+- optional HTTP Push Gateway adapter
 - `codeforge://connect` pairing + built-in offline QR
 
 ## Next increments
 
-1. Add a push-delivery adapter interface and device registration flow; then implement FCM and/or Huawei Push Kit without changing orchestration semantics.
-2. Replace long-lived token-bearing QR links with expiring, single-use device pairing codes.
-3. Add Android-specific Chat / Terminal / Diff touch-density and gesture improvements.
-4. Design first-class generic document/file attachments instead of overloading image transport.
-5. Add stronger HTTP/session authentication for non-private-network deployments.
+1. Add actual Android FCM token acquisition and token-refresh bridge.
+2. Add Huawei Push Kit token acquisition for HMS-capable devices.
+3. Replace the in-memory delivery queue with a durable outbox plus retry/backoff/dead-letter handling.
+4. Replace long-lived token-bearing pairing QR links with expiring, single-use pairing codes.
+5. Add Android-specific Chat / Terminal / Diff touch-density and gesture improvements.
+6. Add stronger HTTP/session authentication for non-private-network deployments.
