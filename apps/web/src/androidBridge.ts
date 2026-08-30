@@ -1,8 +1,12 @@
+import type { MobileDeviceRegistrationInput, MobilePushProvider } from "@codeforge/contracts";
+
 import { WS_TRANSPORT_STATE_EVENT, type TransportState } from "./wsTransport";
 
 const ANDROID_SHARE_EVENT = "codeforge:android-share";
+const ANDROID_DEVICE_ID_STORAGE_KEY = "codeforge.android.deviceId";
 
 export const ANDROID_SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
+export const ANDROID_CLIENT_VERSION = "0.6.0";
 
 export type AndroidNotificationKind = "approval" | "complete" | "input" | "info";
 
@@ -24,9 +28,19 @@ export type AndroidSharedPayload =
       text?: string;
     };
 
+type NativePushRegistration = {
+  deviceId?: string;
+  pushProvider?: MobilePushProvider;
+  pushToken?: string | null;
+  appVersion?: string;
+  deviceLabel?: string | null;
+};
+
 type AndroidJavascriptBridge = {
   notify?: (kind: AndroidNotificationKind, title: string, body: string) => void;
   connectionState?: (state: TransportState) => void;
+  /** Optional v0.6+ native provider descriptor. JSON keeps the JS bridge narrow. */
+  pushRegistration?: () => string;
 };
 
 declare global {
@@ -98,6 +112,62 @@ export function parseAndroidSharedPayload(rawValue: unknown): AndroidSharedPaylo
 
 export function isAndroidApp(): boolean {
   return typeof window !== "undefined" && typeof window.CodeForgeAndroid === "object";
+}
+
+function parseNativePushRegistration(rawValue: unknown): NativePushRegistration | null {
+  const raw = normalizeSharedText(rawValue);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const record = parsed as Record<string, unknown>;
+    const provider = record.pushProvider;
+    const pushProvider: MobilePushProvider =
+      provider === "fcm" || provider === "huawei" || provider === "gateway" ? provider : "none";
+    const pushToken = normalizeSharedText(record.pushToken);
+    return {
+      deviceId: normalizeSharedText(record.deviceId) ?? undefined,
+      pushProvider,
+      pushToken: pushProvider === "none" ? null : pushToken,
+      appVersion: normalizeSharedText(record.appVersion) ?? undefined,
+      deviceLabel: normalizeSharedText(record.deviceLabel),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function getOrCreateAndroidDeviceId(storage: Pick<Storage, "getItem" | "setItem">): string {
+  const existing = normalizeSharedText(storage.getItem(ANDROID_DEVICE_ID_STORAGE_KEY));
+  if (existing) return existing;
+  const generated = crypto.randomUUID();
+  storage.setItem(ANDROID_DEVICE_ID_STORAGE_KEY, generated);
+  return generated;
+}
+
+function androidVersionFromUserAgent(userAgent: string): string {
+  return /CodeForgeAndroid\/([^\s]+)/.exec(userAgent)?.[1] ?? ANDROID_CLIENT_VERSION;
+}
+
+export function readAndroidDeviceRegistration(): MobileDeviceRegistrationInput | null {
+  if (!isAndroidApp()) return null;
+
+  let native: NativePushRegistration | null = null;
+  try {
+    native = parseNativePushRegistration(window.CodeForgeAndroid?.pushRegistration?.());
+  } catch {
+    native = null;
+  }
+
+  const deviceId = native?.deviceId ?? getOrCreateAndroidDeviceId(window.localStorage);
+  return {
+    deviceId,
+    platform: "android",
+    pushProvider: native?.pushProvider ?? "none",
+    pushToken: native?.pushToken ?? null,
+    appVersion: native?.appVersion ?? androidVersionFromUserAgent(window.navigator.userAgent),
+    deviceLabel: native?.deviceLabel ?? "Android device",
+  };
 }
 
 export function installAndroidBridge(): void {
