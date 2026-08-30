@@ -63,6 +63,16 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
 } from "./orchestration";
+import type {
+  MobileDeviceRegistrationInput,
+  MobileGetPushStatusInput,
+  MobileGetPushStatusResult,
+  MobileRegisterDeviceResult,
+  MobileSendTestNotificationInput,
+  MobileSendTestNotificationResult,
+  MobileUnregisterDeviceInput,
+  MobileUnregisterDeviceResult,
+} from "./mobile";
 import { EditorId } from "./editor";
 import { ServerSettings, ServerSettingsPatch } from "./settings";
 import type { StreamingTextDeltaPayload } from "./ws";
@@ -164,7 +174,6 @@ export interface NativeApi {
     openExternal: (url: string) => Promise<void>;
   };
   git: {
-    // Existing branch/worktree API
     listBranches: (input: GitListBranchesInput) => Promise<GitListBranchesResult>;
     createWorktree: (input: GitCreateWorktreeInput) => Promise<GitCreateWorktreeResult>;
     removeWorktree: (input: GitRemoveWorktreeInput) => Promise<void>;
@@ -175,7 +184,6 @@ export interface NativeApi {
     preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Promise<GitPreparePullRequestThreadResult>;
-    // Stacked action API
     pull: (input: GitPullInput) => Promise<GitPullResult>;
     status: (input: GitStatusInput) => Promise<GitStatusResult>;
     runStackedAction: (input: GitRunStackedActionInput) => Promise<GitRunStackedActionResult>;
@@ -186,6 +194,14 @@ export interface NativeApi {
       items: readonly ContextMenuItem<T>[],
       position?: { x: number; y: number },
     ) => Promise<T | null>;
+  };
+  mobile: {
+    registerDevice: (input: MobileDeviceRegistrationInput) => Promise<MobileRegisterDeviceResult>;
+    unregisterDevice: (input: MobileUnregisterDeviceInput) => Promise<MobileUnregisterDeviceResult>;
+    getPushStatus: (input: MobileGetPushStatusInput) => Promise<MobileGetPushStatusResult>;
+    sendTestNotification: (
+      input: MobileSendTestNotificationInput,
+    ) => Promise<MobileSendTestNotificationResult>;
   };
   server: {
     getConfig: () => Promise<ServerConfig>;
