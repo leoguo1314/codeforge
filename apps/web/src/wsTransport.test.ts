@@ -1,7 +1,7 @@
 import { WS_CHANNELS } from "@codeforge/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { WsTransport } from "./wsTransport";
+import { resolveBrowserWsUrl, WsTransport } from "./wsTransport";
 
 type WsEventType = "open" | "message" | "close" | "error";
 type WsListener = (event?: { data?: unknown }) => void;
@@ -16,9 +16,11 @@ class MockWebSocket {
 
   readyState = MockWebSocket.CONNECTING;
   readonly sent: string[] = [];
+  readonly url: string;
   private readonly listeners = new Map<WsEventType, Set<WsListener>>();
 
-  constructor(_url: string) {
+  constructor(url: string) {
+    this.url = url;
     sockets.push(this);
   }
 
@@ -71,7 +73,13 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
-      location: { hostname: "localhost", port: "3020" },
+      location: {
+        protocol: "http:",
+        host: "localhost:3020",
+        hostname: "localhost",
+        port: "3020",
+        search: "",
+      },
       desktopBridge: undefined,
     },
   });
@@ -84,7 +92,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("resolveBrowserWsUrl", () => {
+  it("uses wss and preserves the CodeForge auth token", () => {
+    expect(
+      resolveBrowserWsUrl({
+        protocol: "https:",
+        host: "codeforge.example.com",
+        hostname: "codeforge.example.com",
+        port: "",
+        search: "?token=a%2Bb%2Fc%3D",
+      }),
+    ).toBe("wss://codeforge.example.com?token=a%2Bb%2Fc%3D");
+  });
+});
+
 describe("WsTransport", () => {
+  it("inherits the page auth token for same-origin browser/mobile connections", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: {
+          protocol: "https:",
+          host: "codeforge.example.com",
+          hostname: "codeforge.example.com",
+          port: "",
+          search: "?token=android-secret",
+        },
+        desktopBridge: undefined,
+      },
+    });
+
+    const transport = new WsTransport();
+    expect(getSocket().url).toBe("wss://codeforge.example.com?token=android-secret");
+    transport.dispose();
+  });
+
   it("routes valid push envelopes to channel listeners", () => {
     const transport = new WsTransport("ws://localhost:3020");
     const socket = getSocket();
