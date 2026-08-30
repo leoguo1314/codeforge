@@ -6,6 +6,7 @@ import {
 import { useEffect, useMemo, useRef } from "react";
 
 import {
+  type AndroidSharedImage,
   type AndroidSharedPayload,
   consumePendingAndroidShares,
   isAndroidApp,
@@ -45,6 +46,26 @@ const dataUrlToFile = (dataUrl: string, name: string, mimeType: string): File =>
     bytes[index] = binary.charCodeAt(index);
   }
   return new File([bytes], name, { type: mimeType });
+};
+
+const toComposerAttachment = (sharedImage: AndroidSharedImage): ComposerImageAttachment => {
+  const file = dataUrlToFile(sharedImage.dataUrl, sharedImage.name, sharedImage.mimeType);
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Android shared attachment is not an image.");
+  }
+  if (file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+    throw new Error("Android shared image exceeds the CodeForge attachment size limit.");
+  }
+
+  return {
+    type: "image",
+    id: randomUUID(),
+    name: file.name || "image",
+    mimeType: file.type,
+    sizeBytes: file.size,
+    previewUrl: URL.createObjectURL(file),
+    file,
+  };
 };
 
 export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
@@ -89,36 +110,19 @@ export function AndroidThreadIntegration({ threadId }: { threadId: ThreadId }) {
         return;
       }
 
+      const sharedImages = payload.kind === "images" ? payload.images : [payload];
       try {
-        const file = dataUrlToFile(payload.dataUrl, payload.name, payload.mimeType);
-        if (!file.type.startsWith("image/")) {
-          throw new Error("Android shared attachment is not an image.");
-        }
-        if (file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-          throw new Error("Android shared image exceeds the CodeForge attachment size limit.");
-        }
-
         const currentImages =
           useComposerDraftStore.getState().draftsByThreadId[threadId]?.images ?? [];
-        if (currentImages.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+        if (currentImages.length + sharedImages.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
           throw new Error(
-            `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`,
+            `This share contains ${sharedImages.length} image${sharedImages.length === 1 ? "" : "s"}, but only ${Math.max(0, PROVIDER_SEND_TURN_MAX_ATTACHMENTS - currentImages.length)} attachment slot${PROVIDER_SEND_TURN_MAX_ATTACHMENTS - currentImages.length === 1 ? " is" : "s are"} available.`,
           );
         }
 
-        const image: ComposerImageAttachment = {
-          type: "image",
-          id: randomUUID(),
-          name: file.name || "image",
-          mimeType: file.type,
-          sizeBytes: file.size,
-          previewUrl: URL.createObjectURL(file),
-          file,
-        };
-        addImage(threadId, image);
-        if (payload.text) {
-          appendSharedText(payload.text);
-        }
+        const attachments = sharedImages.map(toComposerAttachment);
+        for (const image of attachments) addImage(threadId, image);
+        if (payload.text) appendSharedText(payload.text);
       } catch (error) {
         toastManager.add({
           type: "error",
