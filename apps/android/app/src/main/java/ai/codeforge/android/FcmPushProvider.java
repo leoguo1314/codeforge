@@ -26,7 +26,7 @@ final class FcmPushProvider implements AndroidPushProvider {
     public void refreshToken(Context context) {
         Context appContext = context.getApplicationContext();
         if (!isConfigured()) {
-            PushRegistrationStore.clearPushToken(appContext);
+            PushRegistrationStore.clearPushTokenIfProvider(appContext, providerId());
             return;
         }
 
