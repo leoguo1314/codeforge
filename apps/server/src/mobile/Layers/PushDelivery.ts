@@ -64,7 +64,7 @@ const sendToGateway = (
       try {
         const headers: Record<string, string> = {
           "content-type": "application/json",
-          "user-agent": "CodeForge-PushDelivery/0.7",
+          "user-agent": "CodeForge-PushDelivery/0.8",
           "idempotency-key": deliveryId,
         };
         if (config.authorization) {
@@ -206,16 +206,19 @@ const makePushDelivery = Effect.gen(function* () {
     );
 
   const getStatus: PushDeliveryShape["getStatus"] = () =>
-    registry.list().pipe(
-      Effect.map((devices): MobilePushServerStatus => ({
+    Effect.gen(function* () {
+      const devices = yield* registry.list();
+      const outboxStats = yield* outbox.stats();
+      return {
         configured: gateway !== null,
         adapter: gateway ? "http-gateway" : "disabled",
         registeredDevices: devices.length,
         pushCapableDevices: devices.filter(
           (device) => device.pushProvider !== "none" && device.pushToken !== null,
         ).length,
-      })),
-    );
+        outbox: outboxStats,
+      } satisfies MobilePushServerStatus;
+    });
 
   const sendTest: PushDeliveryShape["sendTest"] = (deviceId) =>
     Effect.gen(function* () {
@@ -239,7 +242,10 @@ const makePushDelivery = Effect.gen(function* () {
       return persisted._tag === "Success";
     });
 
-  return { enqueue, getStatus, sendTest } satisfies PushDeliveryShape;
+  const replayDead: PushDeliveryShape["replayDead"] = (deliveryId) =>
+    outbox.replayDead(deliveryId);
+
+  return { enqueue, getStatus, sendTest, replayDead } satisfies PushDeliveryShape;
 });
 
 export const PushDeliveryLive = Layer.effect(PushDeliveryService, makePushDelivery);
