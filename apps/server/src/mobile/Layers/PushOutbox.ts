@@ -1,4 +1,8 @@
-import { MobileNotificationPayload, type MobilePushOutboxStats } from "@codeforge/contracts";
+import {
+  MobileNotificationPayload,
+  MobilePushOutboxEntry,
+  type MobilePushOutboxStats,
+} from "@codeforge/contracts";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -11,6 +15,11 @@ import {
 
 const DeliveryIdRequest = Schema.Struct({ deliveryId: Schema.String });
 const DueRequest = Schema.Struct({ now: Schema.String, limit: Schema.Number });
+const AdminListRequest = Schema.Struct({ status: Schema.String, limit: Schema.Number });
+const PurgeRequest = Schema.Struct({
+  deliveredBefore: Schema.NullOr(Schema.String),
+  deadBefore: Schema.NullOr(Schema.String),
+});
 const InsertRequest = Schema.Struct({
   deliveryId: Schema.String,
   deviceId: Schema.String,
@@ -44,6 +53,19 @@ const OutboxRow = Schema.Struct({
   notificationJson: Schema.String,
   attemptCount: Schema.Number,
 });
+const AdminRow = Schema.Struct({
+  deliveryId: Schema.String,
+  deviceId: Schema.String,
+  notificationJson: Schema.String,
+  status: Schema.String,
+  attemptCount: Schema.Number,
+  nextAttemptAt: Schema.String,
+  lastError: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  deliveredAt: Schema.NullOr(Schema.String),
+});
+const DeletedRow = Schema.Struct({ deliveryId: Schema.String });
 const StatusRow = Schema.Struct({ status: Schema.String });
 const StatsRow = Schema.Struct({
   pending: Schema.Number,
@@ -98,6 +120,41 @@ const makePushOutbox = Effect.gen(function* () {
         AND next_attempt_at <= ${now}
       ORDER BY next_attempt_at ASC, created_at ASC
       LIMIT ${limit}
+    `,
+  });
+
+  const findAdminRows = SqlSchema.findAll({
+    Request: AdminListRequest,
+    Result: AdminRow,
+    execute: ({ status, limit }) => sql`
+      SELECT
+        delivery_id AS "deliveryId",
+        device_id AS "deviceId",
+        notification_json AS "notificationJson",
+        status,
+        attempt_count AS "attemptCount",
+        next_attempt_at AS "nextAttemptAt",
+        last_error AS "lastError",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        delivered_at AS "deliveredAt"
+      FROM mobile_push_outbox
+      WHERE (${status} = 'all' OR status = ${status})
+      ORDER BY updated_at DESC
+      LIMIT ${limit}
+    `,
+  });
+
+  const purgeRows = SqlSchema.findAll({
+    Request: PurgeRequest,
+    Result: DeletedRow,
+    execute: ({ deliveredBefore, deadBefore }) => sql`
+      DELETE FROM mobile_push_outbox
+      WHERE
+        (${deliveredBefore} IS NOT NULL AND status = 'delivered' AND updated_at < ${deliveredBefore})
+        OR
+        (${deadBefore} IS NOT NULL AND status = 'dead' AND updated_at < ${deadBefore})
+      RETURNING delivery_id AS "deliveryId"
     `,
   });
 
@@ -181,6 +238,15 @@ const makePushOutbox = Effect.gen(function* () {
     `,
   });
 
+  const decodeNotification = (notificationJson: string, operation: string) =>
+    Effect.try({
+      try: () => JSON.parse(notificationJson) as unknown,
+      catch: toOutboxError(`${operation}.parse`),
+    }).pipe(
+      Effect.flatMap((json) => Schema.decodeUnknownEffect(MobileNotificationPayload)(json)),
+      Effect.mapError(toOutboxError(`${operation}.decode`)),
+    );
+
   const enqueue: PushOutboxShape["enqueue"] = (deviceId, notification) =>
     Effect.gen(function* () {
       const deliveryId = crypto.randomUUID();
@@ -199,12 +265,7 @@ const makePushOutbox = Effect.gen(function* () {
       Effect.mapError(toOutboxError("PushOutbox.listDue.query")),
       Effect.flatMap((rows) =>
         Effect.forEach(rows, (row) =>
-          Effect.try({
-            try: () => JSON.parse(row.notificationJson) as unknown,
-            catch: toOutboxError("PushOutbox.listDue.parse"),
-          }).pipe(
-            Effect.flatMap((json) => Schema.decodeUnknownEffect(MobileNotificationPayload)(json)),
-            Effect.mapError(toOutboxError("PushOutbox.listDue.decode")),
+          decodeNotification(row.notificationJson, "PushOutbox.listDue").pipe(
             Effect.map((notification) => ({
               deliveryId: row.deliveryId,
               deviceId: row.deviceId,
@@ -269,6 +330,42 @@ const makePushOutbox = Effect.gen(function* () {
       }),
     );
 
+  const list: PushOutboxShape["list"] = (status, limit) =>
+    findAdminRows({ status, limit: Math.max(1, Math.min(limit, 200)) }).pipe(
+      Effect.mapError(toOutboxError("PushOutbox.list.query")),
+      Effect.flatMap((rows) =>
+        Effect.forEach(rows, (row) =>
+          decodeNotification(row.notificationJson, "PushOutbox.list").pipe(
+            Effect.flatMap((notification) =>
+              Schema.decodeUnknownEffect(MobilePushOutboxEntry)({
+                deliveryId: row.deliveryId,
+                deviceId: row.deviceId,
+                status: row.status,
+                attemptCount: row.attemptCount,
+                nextAttemptAt: row.nextAttemptAt,
+                lastError: row.lastError,
+                createdAt: row.createdAt,
+                updatedAt: row.updatedAt,
+                deliveredAt: row.deliveredAt,
+                notificationKind: notification.kind,
+                threadId: notification.threadId,
+                title: notification.title,
+                body: notification.body,
+                notificationCreatedAt: notification.createdAt,
+              }),
+            ),
+            Effect.mapError(toOutboxError("PushOutbox.list.entry")),
+          ),
+        ),
+      ),
+    );
+
+  const purge: PushOutboxShape["purge"] = (input) =>
+    purgeRows(input).pipe(
+      Effect.mapError(toOutboxError("PushOutbox.purge")),
+      Effect.map((rows) => rows.length),
+    );
+
   return {
     enqueue,
     listDue,
@@ -277,6 +374,8 @@ const makePushOutbox = Effect.gen(function* () {
     markDead,
     stats,
     replayDead,
+    list,
+    purge,
   } satisfies PushOutboxShape;
 });
 
