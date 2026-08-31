@@ -35,6 +35,7 @@ import { GitCoreLive } from "./git/Layers/GitCore";
 import { GitHubCliLive } from "./git/Layers/GitHubCli";
 import { RoutingTextGenerationLive } from "./git/Layers/RoutingTextGeneration";
 import { MobileDeviceRegistryLive } from "./mobile/Layers/MobileDeviceRegistry";
+import { MobilePairingLive } from "./mobile/Layers/MobilePairing";
 import { PushDeliveryLive } from "./mobile/Layers/PushDelivery";
 import { PushOutboxLive } from "./mobile/Layers/PushOutbox";
 import { PtyAdapter } from "./terminal/Services/PTY";
@@ -98,6 +99,7 @@ export function makeServerRuntimeServicesLayer() {
   const textGenerationLayer = RoutingTextGenerationLive;
   const checkpointStoreLayer = CheckpointStoreLive.pipe(Layer.provide(GitCoreLive));
   const mobileDeviceRegistryLayer = MobileDeviceRegistryLive;
+  const mobilePairingLayer = MobilePairingLive;
   const pushOutboxLayer = PushOutboxLive;
   const pushDeliveryLayer = PushDeliveryLive.pipe(
     Layer.provide(mobileDeviceRegistryLayer),
@@ -156,6 +158,7 @@ export function makeServerRuntimeServicesLayer() {
     terminalLayer,
     KeybindingsLive,
     mobileDeviceRegistryLayer,
+    mobilePairingLayer,
     pushOutboxLayer,
     pushDeliveryLayer,
   ).pipe(Layer.provideMerge(NodeServices.layer));
