@@ -1,4 +1,4 @@
-import type { MobileNotificationPayload } from "@codeforge/contracts";
+import type { MobileNotificationPayload, MobilePushOutboxStats } from "@codeforge/contracts";
 import { Effect, Schema, ServiceMap } from "effect";
 
 export interface PushOutboxItem {
@@ -37,6 +37,8 @@ export interface PushOutboxShape {
     attemptCount: number,
     lastError: string,
   ) => Effect.Effect<void, PushOutboxError>;
+  readonly stats: () => Effect.Effect<MobilePushOutboxStats, PushOutboxError>;
+  readonly replayDead: (deliveryId: string) => Effect.Effect<boolean, PushOutboxError>;
 }
 
 export class PushOutbox extends ServiceMap.Service<PushOutbox, PushOutboxShape>()(
