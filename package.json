@@ -26,6 +26,7 @@
     "dev:server": "node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
+    "push:gateway": "node scripts/mobile-push-gateway.mjs",
     "start": "turbo run start --filter=codeforge",
     "start:desktop": "turbo run start --filter=@codeforge/desktop",
     "build": "turbo run build",
