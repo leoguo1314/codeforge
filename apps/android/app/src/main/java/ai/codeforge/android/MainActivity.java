@@ -7,8 +7,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -73,6 +76,14 @@ public final class MainActivity extends Activity {
     private static final int MENU_CHANGE_CONNECTION = 3;
     private static final int MENU_DISCONNECT = 4;
 
+    private final PushProviderCoordinator pushProviderCoordinator = new PushProviderCoordinator();
+    private final BroadcastReceiver pushRegistrationReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            notifyWebPushRegistrationChanged();
+        }
+    };
+
     private SharedPreferences preferences;
     private FrameLayout contentContainer;
     private TextView serverLabel;
@@ -85,6 +96,7 @@ public final class MainActivity extends Activity {
     private Uri pendingCameraUri;
     private final ArrayDeque<String> pendingShares = new ArrayDeque<>();
     private boolean foreground;
+    private boolean pushRegistrationReceiverRegistered;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -93,6 +105,8 @@ public final class MainActivity extends Activity {
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         createNotificationChannel();
         requestNotificationPermissionIfNeeded();
+        registerPushRegistrationReceiver();
+        pushProviderCoordinator.refreshToken(this);
         setContentView(createRootView());
 
         enqueueIncomingShare(getIntent());
@@ -131,6 +145,7 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         foreground = true;
+        pushProviderCoordinator.refreshToken(this);
     }
 
     @Override
@@ -498,7 +513,9 @@ public final class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSafeBrowsingEnabled(true);
-        settings.setUserAgentString(settings.getUserAgentString() + " CodeForgeAndroid/0.5");
+        settings.setUserAgentString(
+            settings.getUserAgentString() + " CodeForgeAndroid/" + BuildConfig.VERSION_NAME
+        );
         CookieManager.getInstance().setAcceptCookie(true);
 
         view.addJavascriptInterface(new AndroidJavascriptBridge(), "CodeForgeAndroid");
@@ -521,6 +538,7 @@ public final class MainActivity extends Activity {
                     null
                 );
                 dispatchPendingShares();
+                notifyWebPushRegistrationChanged();
             }
         });
 
@@ -592,6 +610,36 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void registerPushRegistrationReceiver() {
+        if (pushRegistrationReceiverRegistered) {
+            return;
+        }
+        IntentFilter filter = new IntentFilter(PushRegistrationStore.ACTION_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(pushRegistrationReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(pushRegistrationReceiver, filter);
+        }
+        pushRegistrationReceiverRegistered = true;
+    }
+
+    private void notifyWebPushRegistrationChanged() {
+        if (webView == null) {
+            return;
+        }
+        runOnUiThread(() -> {
+            if (webView == null) {
+                return;
+            }
+            webView.evaluateJavascript(
+                "if (typeof window.__codeforgeAndroidPushRegistrationChanged === 'function') {" +
+                    " window.__codeforgeAndroidPushRegistrationChanged();" +
+                    "} true;",
+                null
+            );
+        });
+    }
+
     private PairingRequest pairingRequestFromIntent(Intent intent) {
         if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) {
             return null;
@@ -639,6 +687,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateConnectionState(String state) {
+        AppRuntimeState.setConnectionState(state);
         if (connectionLabel == null) return;
         switch (state == null ? "" : state) {
             case "open":
@@ -664,17 +713,7 @@ public final class MainActivity extends Activity {
     }
 
     private void createNotificationChannel() {
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager == null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-            NOTIFICATION_CHANNEL_ID,
-            "CodeForge agent events",
-            NotificationManager.IMPORTANCE_DEFAULT
-        );
-        channel.setDescription("Approvals, user-input requests, and completed agent turns.");
-        manager.createNotificationChannel(channel);
+        AgentNotificationManager.ensureChannel(this);
     }
 
     private void requestNotificationPermissionIfNeeded() {
@@ -694,34 +733,7 @@ public final class MainActivity extends Activity {
         if (foreground) {
             return;
         }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager == null) {
-            return;
-        }
-
-        Intent openIntent = new Intent(this, MainActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-        );
-
-        Notification notification = new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_more)
-            .setContentTitle(TextUtils.isEmpty(title) ? "CodeForge" : title)
-            .setContentText(TextUtils.isEmpty(body) ? kind : body)
-            .setStyle(new Notification.BigTextStyle().bigText(TextUtils.isEmpty(body) ? kind : body))
-            .setContentIntent(contentIntent)
-            .setAutoCancel(true)
-            .build();
-        manager.notify((int) (System.currentTimeMillis() & 0x7fffffff), notification);
+        AgentNotificationManager.post(this, kind, title, body);
     }
 
     private final class AndroidJavascriptBridge {
@@ -732,7 +744,13 @@ public final class MainActivity extends Activity {
 
         @JavascriptInterface
         public void connectionState(String state) {
+            AppRuntimeState.setConnectionState(state);
             runOnUiThread(() -> updateConnectionState(state));
+        }
+
+        @JavascriptInterface
+        public String pushRegistration() {
+            return PushRegistrationStore.toJson(MainActivity.this);
         }
     }
 
@@ -778,6 +796,11 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        AppRuntimeState.setConnectionState("disposed");
+        if (pushRegistrationReceiverRegistered) {
+            unregisterReceiver(pushRegistrationReceiver);
+            pushRegistrationReceiverRegistered = false;
+        }
         cleanupPendingCamera();
         if (pendingFileChooser != null) {
             pendingFileChooser.onReceiveValue(null);
