@@ -15,12 +15,10 @@ android {
         applicationId = "ai.codeforge.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.8.0"
+        versionCode = 9
+        versionName = "0.9.0"
         manifestPlaceholders["usesCleartextTraffic"] = "false"
 
-        // Firebase project configuration is intentionally injected at build time.
-        // These values identify the Firebase app but are never hard-coded into the repo.
         buildConfigField(
             "String",
             "FIREBASE_APPLICATION_ID",
@@ -41,9 +39,6 @@ android {
             "FIREBASE_SENDER_ID",
             quotedBuildConfig(buildEnv("CODEFORGE_FIREBASE_SENDER_ID")),
         )
-
-        // Huawei Push Kit can also be configured without committing an
-        // agconnect-services.json file. The App ID is injected by the build.
         buildConfigField(
             "String",
             "HUAWEI_APP_ID",
