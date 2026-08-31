@@ -21,30 +21,47 @@ const serverConfigUpdatedListeners = new Set<(payload: ServerConfigUpdatedPayloa
 const providersUpdatedListeners = new Set<(payload: ServerProviderUpdatedPayload) => void>();
 const gitActionProgressListeners = new Set<(payload: GitActionProgressEvent) => void>();
 
+/**
+ * Subscribe to the server welcome message. If a welcome was already received
+ * before this call, the listener fires synchronously with the cached payload.
+ * This avoids the race between WebSocket connect and React effect registration.
+ */
 export function onServerWelcome(listener: (payload: WsWelcomePayload) => void): () => void {
   welcomeListeners.add(listener);
+
   const latestWelcome = instance?.transport.getLatestPush(WS_CHANNELS.serverWelcome)?.data ?? null;
   if (latestWelcome) {
     try {
       listener(latestWelcome);
-    } catch {}
+    } catch {
+      // Swallow listener errors
+    }
   }
+
   return () => {
     welcomeListeners.delete(listener);
   };
 }
 
+/**
+ * Subscribe to server config update events. Replays the latest update for
+ * late subscribers to avoid missing config validation feedback.
+ */
 export function onServerConfigUpdated(
   listener: (payload: ServerConfigUpdatedPayload) => void,
 ): () => void {
   serverConfigUpdatedListeners.add(listener);
+
   const latestConfig =
     instance?.transport.getLatestPush(WS_CHANNELS.serverConfigUpdated)?.data ?? null;
   if (latestConfig) {
     try {
       listener(latestConfig);
-    } catch {}
+    } catch {
+      // Swallow listener errors
+    }
   }
+
   return () => {
     serverConfigUpdatedListeners.delete(listener);
   };
@@ -54,13 +71,17 @@ export function onServerProvidersUpdated(
   listener: (payload: ServerProviderUpdatedPayload) => void,
 ): () => void {
   providersUpdatedListeners.add(listener);
+
   const latestProviders =
     instance?.transport.getLatestPush(WS_CHANNELS.serverProvidersUpdated)?.data ?? null;
   if (latestProviders) {
     try {
       listener(latestProviders);
-    } catch {}
+    } catch {
+      // Swallow listener errors
+    }
   }
+
   return () => {
     providersUpdatedListeners.delete(listener);
   };
@@ -72,31 +93,43 @@ export function createWsNativeApi(): NativeApi {
   const transport = new WsTransport();
 
   transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
+    const payload = message.data;
     for (const listener of welcomeListeners) {
       try {
-        listener(message.data);
-      } catch {}
+        listener(payload);
+      } catch {
+        // Swallow listener errors
+      }
     }
   });
   transport.subscribe(WS_CHANNELS.serverConfigUpdated, (message) => {
+    const payload = message.data;
     for (const listener of serverConfigUpdatedListeners) {
       try {
-        listener(message.data);
-      } catch {}
+        listener(payload);
+      } catch {
+        // Swallow listener errors
+      }
     }
   });
   transport.subscribe(WS_CHANNELS.serverProvidersUpdated, (message) => {
+    const payload = message.data;
     for (const listener of providersUpdatedListeners) {
       try {
-        listener(message.data);
-      } catch {}
+        listener(payload);
+      } catch {
+        // Swallow listener errors
+      }
     }
   });
   transport.subscribe(WS_CHANNELS.gitActionProgress, (message) => {
+    const payload = message.data;
     for (const listener of gitActionProgressListeners) {
       try {
-        listener(message.data);
-      } catch {}
+        listener(payload);
+      } catch {
+        // Swallow listener errors
+      }
     }
   });
   transport.subscribe(WS_CHANNELS.mobileNotification, (message) => {
@@ -111,7 +144,9 @@ export function createWsNativeApi(): NativeApi {
         return window.desktopBridge.pickFolder();
       },
       confirm: async (message) => {
-        if (window.desktopBridge) return window.desktopBridge.confirm(message);
+        if (window.desktopBridge) {
+          return window.desktopBridge.confirm(message);
+        }
         return window.confirm(message);
       },
     },
@@ -145,9 +180,14 @@ export function createWsNativeApi(): NativeApi {
       openExternal: async (url) => {
         if (window.desktopBridge) {
           const opened = await window.desktopBridge.openExternal(url);
-          if (!opened) throw new Error("Unable to open link.");
+          if (!opened) {
+            throw new Error("Unable to open link.");
+          }
           return;
         }
+
+        // Some mobile browsers can return null here even when the tab opens.
+        // Avoid false negatives and let the browser handle popup policy.
         window.open(url, "_blank", "noopener,noreferrer");
       },
     },
@@ -167,7 +207,9 @@ export function createWsNativeApi(): NativeApi {
         transport.request(WS_METHODS.gitPreparePullRequestThread, input),
       onActionProgress: (callback) => {
         gitActionProgressListeners.add(callback);
-        return () => gitActionProgressListeners.delete(callback);
+        return () => {
+          gitActionProgressListeners.delete(callback);
+        };
       },
     },
     contextMenu: {
@@ -187,10 +229,6 @@ export function createWsNativeApi(): NativeApi {
       getPushStatus: (input) => transport.request(WS_METHODS.mobileGetPushStatus, input),
       sendTestNotification: (input) =>
         transport.request(WS_METHODS.mobileSendTestNotification, input),
-      createPairingCode: () => transport.request(WS_METHODS.mobileCreatePairingCode),
-      listPushOutbox: (input) => transport.request(WS_METHODS.mobileListPushOutbox, input),
-      replayDeadPush: (input) => transport.request(WS_METHODS.mobileReplayDeadPush, input),
-      purgePushOutbox: (input) => transport.request(WS_METHODS.mobilePurgePushOutbox, input),
     },
     server: {
       getConfig: () => transport.request(WS_METHODS.serverGetConfig),
@@ -209,7 +247,9 @@ export function createWsNativeApi(): NativeApi {
       replayEvents: (fromSequenceExclusive) =>
         transport.request(ORCHESTRATION_WS_METHODS.replayEvents, { fromSequenceExclusive }),
       onDomainEvent: (callback) =>
-        transport.subscribe(ORCHESTRATION_WS_CHANNELS.domainEvent, (message) => callback(message.data)),
+        transport.subscribe(ORCHESTRATION_WS_CHANNELS.domainEvent, (message) =>
+          callback(message.data),
+        ),
       onStreamingTextDelta: (callback) =>
         transport.subscribe(WS_CHANNELS.streamingTextDelta, (message) => callback(message.data)),
     },

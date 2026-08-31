@@ -1,1283 +1,228 @@
-/**
- * Server - HTTP/WebSocket server service interface.
- *
- * Owns startup and shutdown lifecycle of the HTTP server, static asset serving,
- * and WebSocket request routing.
- *
- * @module Server
- */
-import http from "node:http";
+import type http from "node:http";
 import type { Duplex } from "node:stream";
 
-import Mime from "@effect/platform-node/Mime";
 import {
-  CommandId,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
-  type ClientOrchestrationCommand,
-  type OrchestrationCommand,
-  ORCHESTRATION_WS_CHANNELS,
-  ORCHESTRATION_WS_METHODS,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
-  ProjectId,
-  ThreadId,
-  WS_CHANNELS,
-  WS_METHODS,
-  WebSocketRequest,
-  type WsResponse as WsResponseMessage,
-  WsResponse,
-  type WsPushEnvelopeBase,
+  MobileListPushOutboxInput,
+  MobilePairingRedeemInput,
+  MobilePurgePushOutboxInput,
+  MobileReplayDeadPushInput,
 } from "@codeforge/contracts";
-import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import { Effect, Layer, Schema } from "effect";
+
+import { ServerConfig } from "./config.ts";
+import { MobilePairing } from "./mobile/Services/MobilePairing.ts";
+import { PushOutbox } from "./mobile/Services/PushOutbox.ts";
 import {
-  Cause,
-  Effect,
-  Exit,
-  FileSystem,
-  Layer,
-  Path,
-  Ref,
-  Result,
-  Schema,
-  Scope,
-  ServiceMap,
-  Stream,
-  Struct,
-} from "effect";
-import { WebSocketServer, type WebSocket } from "ws";
+  createServer as createCoreServer,
+  Server,
+  type ServerShape,
+} from "./wsServerCore.ts";
 
-import { createLogger } from "./logger";
-import { GitManager } from "./git/Services/GitManager.ts";
-import { TerminalManager } from "./terminal/Services/Manager.ts";
-import { Keybindings } from "./keybindings";
-import { ServerSettingsService } from "./serverSettings";
-import { searchWorkspaceEntries } from "./workspaceEntries";
-import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
-import { StreamingDeltaBusService } from "./orchestration/Services/StreamingDeltaBus";
-import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
-import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
-import { ProviderService } from "./provider/Services/ProviderService";
-import { ProviderRegistry } from "./provider/Services/ProviderRegistry";
-import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
-import { ThreadSearchIndex } from "./persistence/Services/ThreadSearchIndex";
-import { MobileDeviceRegistry } from "./mobile/Services/MobileDeviceRegistry";
-import { PushDeliveryService } from "./mobile/Services/PushDelivery";
-import { clamp } from "effect/Number";
-import { Open, resolveAvailableEditors } from "./open";
-import { ServerConfig } from "./config";
-import { GitCore } from "./git/Services/GitCore.ts";
-import { tryHandleProjectFaviconRequest } from "./projectFaviconRoute";
-import {
-  ATTACHMENTS_ROUTE_PREFIX,
-  normalizeAttachmentRelativePath,
-  resolveAttachmentRelativePath,
-} from "./attachmentPaths";
+export { Server, ServerLifecycleError } from "./wsServerCore.ts";
+export type {
+  ServerShape,
+  ServerCoreRuntimeServices,
+  ServerRuntimeServices,
+} from "./wsServerCore.ts";
 
-import {
-  createAttachmentId,
-  resolveAttachmentPath,
-  resolveAttachmentPathById,
-} from "./attachmentStore.ts";
-import { parseBase64DataUrl } from "./imageMime.ts";
-import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
-import { expandHomePath } from "./os-jank.ts";
-import { makeServerPushBus } from "./wsServer/pushBus.ts";
-import { makeServerReadiness } from "./wsServer/readiness.ts";
-import { decodeJsonResult, formatSchemaError } from "@codeforge/shared/schemaJson";
+const MOBILE_ROUTE_PREFIX = "/api/mobile/";
+const MAX_JSON_BYTES = 16 * 1024;
 
-/**
- * ServerShape - Service API for server lifecycle control.
- */
-export interface ServerShape {
-  /**
-   * Start HTTP and WebSocket listeners.
-   */
-  readonly start: Effect.Effect<
-    http.Server,
-    ServerLifecycleError,
-    Scope.Scope | ServerRuntimeServices | ServerConfig | FileSystem.FileSystem | Path.Path
-  >;
-
-  /**
-   * Wait for process shutdown signals.
-   */
-  readonly stopSignal: Effect.Effect<void, never>;
-}
-
-/**
- * Server - Service tag for HTTP/WebSocket lifecycle management.
- */
-export class Server extends ServiceMap.Service<Server, ServerShape>()(
-  "codeforge/wsServer/Server",
-) {}
-
-const isServerNotRunningError = (error: Error): boolean => {
-  const maybeCode = (error as NodeJS.ErrnoException).code;
-  return (
-    maybeCode === "ERR_SERVER_NOT_RUNNING" || error.message.toLowerCase().includes("not running")
-  );
+const sendJson = (
+  response: http.ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) => {
+  const encoded = JSON.stringify(body);
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "content-length": String(Buffer.byteLength(encoded)),
+    ...headers,
+  });
+  response.end(encoded);
 };
 
-function rejectUpgrade(socket: Duplex, statusCode: number, message: string): void {
-  socket.end(
-    `HTTP/1.1 ${statusCode} ${statusCode === 401 ? "Unauthorized" : "Bad Request"}\r\n` +
-      "Connection: close\r\n" +
-      "Content-Type: text/plain\r\n" +
-      `Content-Length: ${Buffer.byteLength(message)}\r\n` +
-      "\r\n" +
-      message,
-  );
-}
+const readJsonBody = async (request: http.IncomingMessage): Promise<unknown> => {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const raw of request) {
+    const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    total += chunk.byteLength;
+    if (total > MAX_JSON_BYTES) throw new Error("request body too large");
+    chunks.push(chunk);
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  return JSON.parse(text || "{}");
+};
 
-function websocketRawToString(raw: unknown): string | null {
-  if (typeof raw === "string") {
-    return raw;
+const providedAdminToken = (request: http.IncomingMessage, url: URL): string | null => {
+  const authorization = request.headers.authorization?.trim() ?? "";
+  if (authorization.toLowerCase().startsWith("bearer ")) {
+    const bearer = authorization.slice(7).trim();
+    if (bearer) return bearer;
   }
-  if (raw instanceof Uint8Array) {
-    return Buffer.from(raw).toString("utf8");
-  }
-  if (raw instanceof ArrayBuffer) {
-    return Buffer.from(new Uint8Array(raw)).toString("utf8");
-  }
-  if (Array.isArray(raw)) {
-    const chunks: string[] = [];
-    for (const chunk of raw) {
-      if (typeof chunk === "string") {
-        chunks.push(chunk);
-        continue;
-      }
-      if (chunk instanceof Uint8Array) {
-        chunks.push(Buffer.from(chunk).toString("utf8"));
-        continue;
-      }
-      if (chunk instanceof ArrayBuffer) {
-        chunks.push(Buffer.from(new Uint8Array(chunk)).toString("utf8"));
-        continue;
-      }
-      return null;
+  return url.searchParams.get("token");
+};
+
+const invokeListeners = (
+  server: http.Server,
+  listeners: ReadonlyArray<Function>,
+  args: ReadonlyArray<unknown>,
+) => {
+  for (const listener of listeners) listener.apply(server, args);
+};
+
+export const createServer = Effect.fn(function* () {
+  const config = yield* ServerConfig;
+  const pairing = yield* MobilePairing;
+  const outbox = yield* PushOutbox;
+  const server = yield* createCoreServer();
+
+  const originalRequestListeners = server.listeners("request");
+  server.removeAllListeners("request");
+  server.on("request", (request, response) => {
+    const url = new URL(request.url ?? "/", `http://localhost:${config.port}`);
+    if (!url.pathname.startsWith(MOBILE_ROUTE_PREFIX)) {
+      invokeListeners(server, originalRequestListeners, [request, response]);
+      return;
     }
-    return chunks.join("");
-  }
-  return null;
-}
 
-function toPosixRelativePath(input: string): string {
-  return input.replaceAll("\\", "/");
-}
+    const run = async () => {
+      if (url.pathname === "/api/mobile/pair/redeem") {
+        if (request.method !== "POST") {
+          sendJson(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+          return;
+        }
+        try {
+          const raw = await readJsonBody(request);
+          const input = await Effect.runPromise(
+            Schema.decodeUnknownEffect(MobilePairingRedeemInput)(raw),
+          );
+          const result = await Effect.runPromise(pairing.redeemCode(input));
+          sendJson(response, 200, result);
+        } catch {
+          sendJson(response, 400, { error: "Pairing code is invalid, expired, or already used." });
+        }
+        return;
+      }
 
-function resolveWorkspaceWritePath(params: {
-  workspaceRoot: string;
-  relativePath: string;
-  path: Path.Path;
-}): Effect.Effect<{ absolutePath: string; relativePath: string }, RouteRequestError> {
-  const normalizedInputPath = params.relativePath.trim();
-  if (params.path.isAbsolute(normalizedInputPath)) {
-    return Effect.fail(
-      new RouteRequestError({
-        message: "Workspace file path must be relative to the project root.",
-      }),
-    );
-  }
+      if (config.authToken) {
+        const supplied = providedAdminToken(request, url);
+        if (supplied !== config.authToken) {
+          sendJson(response, 401, { error: "Administrator authentication required." });
+          return;
+        }
+      }
 
-  const absolutePath = params.path.resolve(params.workspaceRoot, normalizedInputPath);
-  const relativeToRoot = toPosixRelativePath(
-    params.path.relative(params.workspaceRoot, absolutePath),
-  );
-  if (
-    relativeToRoot.length === 0 ||
-    relativeToRoot === "." ||
-    relativeToRoot.startsWith("../") ||
-    relativeToRoot === ".." ||
-    params.path.isAbsolute(relativeToRoot)
-  ) {
-    return Effect.fail(
-      new RouteRequestError({
-        message: "Workspace file path must stay within the project root.",
-      }),
-    );
-  }
+      try {
+        if (url.pathname === "/api/mobile/pair/create") {
+          if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+            return;
+          }
+          sendJson(response, 200, await Effect.runPromise(pairing.createCode()));
+          return;
+        }
 
-  return Effect.succeed({
-    absolutePath,
-    relativePath: relativeToRoot,
-  });
-}
+        if (url.pathname === "/api/mobile/push/outbox") {
+          if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+            return;
+          }
+          const raw = await readJsonBody(request);
+          const input = await Effect.runPromise(
+            Schema.decodeUnknownEffect(MobileListPushOutboxInput)(raw),
+          );
+          const entries = await Effect.runPromise(outbox.list(input.status, input.limit));
+          sendJson(response, 200, { entries });
+          return;
+        }
 
-function stripRequestTag<T extends { _tag: string }>(body: T) {
-  return Struct.omit(body, ["_tag"]);
-}
+        if (url.pathname === "/api/mobile/push/outbox/replay") {
+          if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+            return;
+          }
+          const raw = await readJsonBody(request);
+          const input = await Effect.runPromise(
+            Schema.decodeUnknownEffect(MobileReplayDeadPushInput)(raw),
+          );
+          const replayed = await Effect.runPromise(outbox.replayDead(input.deliveryId));
+          sendJson(response, 200, { deliveryId: input.deliveryId, replayed });
+          return;
+        }
 
-const encodeWsResponse = Schema.encodeEffect(Schema.fromJsonString(WsResponse));
-const decodeWebSocketRequest = decodeJsonResult(WebSocketRequest);
+        if (url.pathname === "/api/mobile/push/outbox/purge") {
+          if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" }, { allow: "POST" });
+            return;
+          }
+          const raw = await readJsonBody(request);
+          const input = await Effect.runPromise(
+            Schema.decodeUnknownEffect(MobilePurgePushOutboxInput)(raw),
+          );
+          const deleted = await Effect.runPromise(outbox.purge(input));
+          sendJson(response, 200, { deleted });
+          return;
+        }
 
-export type ServerCoreRuntimeServices =
-  | OrchestrationEngineService
-  | ProjectionSnapshotQuery
-  | CheckpointDiffQuery
-  | ThreadSearchIndex
-  | OrchestrationReactor
-  | StreamingDeltaBusService
-  | ProviderService
-  | ProviderRegistry;
-
-export type ServerRuntimeServices =
-  | ServerCoreRuntimeServices
-  | GitManager
-  | GitCore
-  | TerminalManager
-  | Keybindings
-  | ServerSettingsService
-  | MobileDeviceRegistry
-  | PushDeliveryService
-  | Open
-  | AnalyticsService;
-
-export class ServerLifecycleError extends Schema.TaggedErrorClass<ServerLifecycleError>()(
-  "ServerLifecycleError",
-  {
-    operation: Schema.String,
-    cause: Schema.optional(Schema.Defect),
-  },
-) {}
-
-class RouteRequestError extends Schema.TaggedErrorClass<RouteRequestError>()("RouteRequestError", {
-  message: Schema.String,
-}) {}
-
-export const createServer = Effect.fn(function* (): Effect.fn.Return<
-  http.Server,
-  ServerLifecycleError,
-  Scope.Scope | ServerRuntimeServices | ServerConfig | FileSystem.FileSystem | Path.Path
-> {
-  const serverConfig = yield* ServerConfig;
-  const {
-    port,
-    cwd,
-    keybindingsConfigPath,
-    staticDir,
-    devUrl,
-    authToken,
-    host,
-    logWebSocketEvents,
-    autoBootstrapProjectFromCwd,
-  } = serverConfig;
-  const availableEditors = resolveAvailableEditors();
-
-  const gitManager = yield* GitManager;
-  const terminalManager = yield* TerminalManager;
-  const keybindingsManager = yield* Keybindings;
-  const serverSettingsManager = yield* ServerSettingsService;
-  const providerRegistry = yield* ProviderRegistry;
-  const mobileDeviceRegistry = yield* MobileDeviceRegistry;
-  const pushDelivery = yield* PushDeliveryService;
-  const git = yield* GitCore;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  yield* keybindingsManager.syncDefaultKeybindingsOnStartup.pipe(
-    Effect.catch((error) =>
-      Effect.logWarning("failed to sync keybindings defaults on startup", {
-        path: error.configPath,
-        detail: error.detail,
-        cause: error.cause,
-      }),
-    ),
-  );
-
-  const providersRef = yield* Ref.make(yield* providerRegistry.getProviders);
-
-  const clients = yield* Ref.make(new Set<WebSocket>());
-  const logger = createLogger("ws");
-  const readiness = yield* makeServerReadiness;
-
-  function logOutgoingPush(push: WsPushEnvelopeBase, recipients: number) {
-    if (!logWebSocketEvents) return;
-    logger.event("outgoing push", {
-      channel: push.channel,
-      sequence: push.sequence,
-      recipients,
-      payload: push.data,
-    });
-  }
-
-  const pushBus = yield* makeServerPushBus({
-    clients,
-    logOutgoingPush,
-    enqueueMobileNotification: (notification) => pushDelivery.enqueue(notification),
-  });
-  yield* readiness.markPushBusReady;
-  yield* keybindingsManager.start.pipe(
-    Effect.mapError(
-      (cause) => new ServerLifecycleError({ operation: "keybindingsRuntimeStart", cause }),
-    ),
-  );
-  yield* readiness.markKeybindingsReady;
-  yield* serverSettingsManager.start.pipe(
-    Effect.mapError(
-      (cause) => new ServerLifecycleError({ operation: "serverSettingsRuntimeStart", cause }),
-    ),
-  );
-
-  const normalizeDispatchCommand = Effect.fnUntraced(function* (input: {
-    readonly command: ClientOrchestrationCommand;
-  }) {
-    const normalizeProjectWorkspaceRoot = Effect.fnUntraced(function* (workspaceRoot: string) {
-      const normalizedWorkspaceRoot = path.resolve(yield* expandHomePath(workspaceRoot.trim()));
-      const workspaceStat = yield* fileSystem
-        .stat(normalizedWorkspaceRoot)
-        .pipe(Effect.catch(() => Effect.succeed(null)));
-      if (!workspaceStat) {
-        return yield* new RouteRequestError({
-          message: `Project directory does not exist: ${normalizedWorkspaceRoot}`,
+        sendJson(response, 404, { error: "Not found" });
+      } catch (cause) {
+        sendJson(response, 500, {
+          error: cause instanceof Error ? cause.message : "Mobile administration request failed.",
         });
       }
-      if (workspaceStat.type !== "Directory") {
-        return yield* new RouteRequestError({
-          message: `Project path is not a directory: ${normalizedWorkspaceRoot}`,
-        });
-      }
-      return normalizedWorkspaceRoot;
-    });
-
-    if (input.command.type === "project.create") {
-      return {
-        ...input.command,
-        workspaceRoot: yield* normalizeProjectWorkspaceRoot(input.command.workspaceRoot),
-      } satisfies OrchestrationCommand;
-    }
-
-    if (input.command.type === "project.meta.update" && input.command.workspaceRoot !== undefined) {
-      return {
-        ...input.command,
-        workspaceRoot: yield* normalizeProjectWorkspaceRoot(input.command.workspaceRoot),
-      } satisfies OrchestrationCommand;
-    }
-
-    if (input.command.type !== "thread.turn.start") {
-      return input.command as OrchestrationCommand;
-    }
-    const turnStartCommand = input.command;
-
-    const normalizedAttachments = yield* Effect.forEach(
-      turnStartCommand.message.attachments,
-      (attachment) =>
-        Effect.gen(function* () {
-          const parsed = parseBase64DataUrl(attachment.dataUrl);
-          if (!parsed || !parsed.mimeType.startsWith("image/")) {
-            return yield* new RouteRequestError({
-              message: `Invalid image attachment payload for '${attachment.name}'.`,
-            });
-          }
-
-          const bytes = Buffer.from(parsed.base64, "base64");
-          if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-            return yield* new RouteRequestError({
-              message: `Image attachment '${attachment.name}' is empty or too large.`,
-            });
-          }
-
-          const attachmentId = createAttachmentId(turnStartCommand.threadId);
-          if (!attachmentId) {
-            return yield* new RouteRequestError({
-              message: "Failed to create a safe attachment id.",
-            });
-          }
-
-          const persistedAttachment = {
-            type: "image" as const,
-            id: attachmentId,
-            name: attachment.name,
-            mimeType: parsed.mimeType.toLowerCase(),
-            sizeBytes: bytes.byteLength,
-          };
-
-          const attachmentPath = resolveAttachmentPath({
-            attachmentsDir: serverConfig.attachmentsDir,
-            attachment: persistedAttachment,
-          });
-          if (!attachmentPath) {
-            return yield* new RouteRequestError({
-              message: `Failed to resolve persisted path for '${attachment.name}'.`,
-            });
-          }
-
-          yield* fileSystem.makeDirectory(path.dirname(attachmentPath), { recursive: true }).pipe(
-            Effect.mapError(
-              () =>
-                new RouteRequestError({
-                  message: `Failed to create attachment directory for '${attachment.name}'.`,
-                }),
-            ),
-          );
-          yield* fileSystem.writeFile(attachmentPath, bytes).pipe(
-            Effect.mapError(
-              () =>
-                new RouteRequestError({
-                  message: `Failed to persist attachment '${attachment.name}'.`,
-                }),
-            ),
-          );
-
-          return persistedAttachment;
-        }),
-      { concurrency: 1 },
-    );
-
-    return {
-      ...turnStartCommand,
-      message: {
-        ...turnStartCommand.message,
-        attachments: normalizedAttachments,
-      },
-    } satisfies OrchestrationCommand;
-  });
-
-  // HTTP server — serves static files or redirects to Vite dev server
-  const httpServer = http.createServer((req, res) => {
-    const respond = (
-      statusCode: number,
-      headers: Record<string, string>,
-      body?: string | Uint8Array,
-    ) => {
-      res.writeHead(statusCode, headers);
-      res.end(body);
     };
+
+    void run();
+  });
+
+  // The core server still owns WebSocket upgrade mechanics. For a valid mobile
+  // session we rewrite only the internal request token to the administrator
+  // token before delegating, so no core routing/connection behavior is forked.
+  const originalUpgradeListeners = server.listeners("upgrade");
+  server.removeAllListeners("upgrade");
+  server.on("upgrade", (request, socket: Duplex, head) => {
+    if (!config.authToken) {
+      invokeListeners(server, originalUpgradeListeners, [request, socket, head]);
+      return;
+    }
+
+    let supplied: string | null = null;
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(request.url ?? "/", `http://localhost:${config.port}`);
+      supplied = parsed.searchParams.get("token");
+    } catch {
+      invokeListeners(server, originalUpgradeListeners, [request, socket, head]);
+      return;
+    }
+
+    if (!supplied || supplied === config.authToken) {
+      invokeListeners(server, originalUpgradeListeners, [request, socket, head]);
+      return;
+    }
 
     void Effect.runPromise(
-      Effect.gen(function* () {
-        const url = new URL(req.url ?? "/", `http://localhost:${port}`);
-        if (tryHandleProjectFaviconRequest(url, res)) {
-          return;
-        }
-
-        if (url.pathname.startsWith(ATTACHMENTS_ROUTE_PREFIX)) {
-          const rawRelativePath = url.pathname.slice(ATTACHMENTS_ROUTE_PREFIX.length);
-          const normalizedRelativePath = normalizeAttachmentRelativePath(rawRelativePath);
-          if (!normalizedRelativePath) {
-            respond(400, { "Content-Type": "text/plain" }, "Invalid attachment path");
-            return;
-          }
-
-          const isIdLookup =
-            !normalizedRelativePath.includes("/") && !normalizedRelativePath.includes(".");
-          const filePath = isIdLookup
-            ? resolveAttachmentPathById({
-                attachmentsDir: serverConfig.attachmentsDir,
-                attachmentId: normalizedRelativePath,
-              })
-            : resolveAttachmentRelativePath({
-                attachmentsDir: serverConfig.attachmentsDir,
-                relativePath: normalizedRelativePath,
-              });
-          if (!filePath) {
-            respond(
-              isIdLookup ? 404 : 400,
-              { "Content-Type": "text/plain" },
-              isIdLookup ? "Not Found" : "Invalid attachment path",
-            );
-            return;
-          }
-
-          const fileInfo = yield* fileSystem
-            .stat(filePath)
-            .pipe(Effect.catch(() => Effect.succeed(null)));
-          if (!fileInfo || fileInfo.type !== "File") {
-            respond(404, { "Content-Type": "text/plain" }, "Not Found");
-            return;
-          }
-
-          const contentType = Mime.getType(filePath) ?? "application/octet-stream";
-          res.writeHead(200, {
-            "Content-Type": contentType,
-            "Cache-Control": "public, max-age=31536000, immutable",
-          });
-          const streamExit = yield* Stream.runForEach(fileSystem.stream(filePath), (chunk) =>
-            Effect.sync(() => {
-              if (!res.destroyed) {
-                res.write(chunk);
-              }
-            }),
-          ).pipe(Effect.exit);
-          if (Exit.isFailure(streamExit)) {
-            if (!res.destroyed) {
-              res.destroy();
-            }
-            return;
-          }
-          if (!res.writableEnded) {
-            res.end();
-          }
-          return;
-        }
-
-        // In dev mode, redirect to Vite dev server
-        if (devUrl) {
-          respond(302, { Location: devUrl.href });
-          return;
-        }
-
-        // Serve static files from the web app build
-        if (!staticDir) {
-          respond(
-            503,
-            { "Content-Type": "text/plain" },
-            "No static directory configured and no dev URL set.",
-          );
-          return;
-        }
-
-        const staticRoot = path.resolve(staticDir);
-        const staticRequestPath = url.pathname === "/" ? "/index.html" : url.pathname;
-        const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
-        const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
-        const staticRelativePath = path.normalize(rawStaticRelativePath).replace(/^[/\\]+/, "");
-        const hasPathTraversalSegment = staticRelativePath.startsWith("..");
-        if (
-          staticRelativePath.length === 0 ||
-          hasRawLeadingParentSegment ||
-          hasPathTraversalSegment ||
-          staticRelativePath.includes("\0")
-        ) {
-          respond(400, { "Content-Type": "text/plain" }, "Invalid static file path");
-          return;
-        }
-
-        const isWithinStaticRoot = (candidate: string) =>
-          candidate === staticRoot ||
-          candidate.startsWith(
-            staticRoot.endsWith(path.sep) ? staticRoot : `${staticRoot}${path.sep}`,
-          );
-
-        let filePath = path.resolve(staticRoot, staticRelativePath);
-        if (!isWithinStaticRoot(filePath)) {
-          respond(400, { "Content-Type": "text/plain" }, "Invalid static file path");
-          return;
-        }
-
-        const ext = path.extname(filePath);
-        if (!ext) {
-          filePath = path.resolve(filePath, "index.html");
-          if (!isWithinStaticRoot(filePath)) {
-            respond(400, { "Content-Type": "text/plain" }, "Invalid static file path");
-            return;
-          }
-        }
-
-        const fileInfo = yield* fileSystem
-          .stat(filePath)
-          .pipe(Effect.catch(() => Effect.succeed(null)));
-        if (!fileInfo || fileInfo.type !== "File") {
-          const indexPath = path.resolve(staticRoot, "index.html");
-          const indexData = yield* fileSystem
-            .readFile(indexPath)
-            .pipe(Effect.catch(() => Effect.succeed(null)));
-          if (!indexData) {
-            respond(404, { "Content-Type": "text/plain" }, "Not Found");
-            return;
-          }
-          respond(200, { "Content-Type": "text/html; charset=utf-8" }, indexData);
-          return;
-        }
-
-        const contentType = Mime.getType(filePath) ?? "application/octet-stream";
-        const data = yield* fileSystem
-          .readFile(filePath)
-          .pipe(Effect.catch(() => Effect.succeed(null)));
-        if (!data) {
-          respond(500, { "Content-Type": "text/plain" }, "Internal Server Error");
-          return;
-        }
-        respond(200, { "Content-Type": contentType }, data);
-      }),
-    ).catch(() => {
-      if (!res.headersSent) {
-        respond(500, { "Content-Type": "text/plain" }, "Internal Server Error");
+      pairing
+        .validateSessionToken(supplied)
+        .pipe(Effect.catch(() => Effect.succeed(false))),
+    ).then((valid) => {
+      if (socket.destroyed) return;
+      if (valid && parsed) {
+        parsed.searchParams.set("token", config.authToken!);
+        request.url = `${parsed.pathname}${parsed.search}`;
       }
+      invokeListeners(server, originalUpgradeListeners, [request, socket, head]);
     });
   });
 
-  // WebSocket server — upgrades from the HTTP server
-  const wss = new WebSocketServer({ noServer: true });
-
-  const closeWebSocketServer = Effect.callback<void, ServerLifecycleError>((resume) => {
-    wss.close((error) => {
-      if (error && !isServerNotRunningError(error)) {
-        resume(
-          Effect.fail(
-            new ServerLifecycleError({ operation: "closeWebSocketServer", cause: error }),
-          ),
-        );
-      } else {
-        resume(Effect.void);
-      }
-    });
-  });
-
-  const closeAllClients = Ref.get(clients).pipe(
-    Effect.flatMap(Effect.forEach((client) => Effect.sync(() => client.close()))),
-    Effect.flatMap(() => Ref.set(clients, new Set())),
-  );
-
-  const listenOptions = host ? { host, port } : { port };
-
-  const orchestrationEngine = yield* OrchestrationEngineService;
-  const streamingDeltaBus = yield* StreamingDeltaBusService;
-  const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
-  const checkpointDiffQuery = yield* CheckpointDiffQuery;
-  const threadSearchIndex = yield* ThreadSearchIndex;
-  const orchestrationReactor = yield* OrchestrationReactor;
-  const { openInEditor } = yield* Open;
-
-  const subscriptionsScope = yield* Scope.make("sequential");
-  yield* Effect.addFinalizer(() => Scope.close(subscriptionsScope, Exit.void));
-
-  yield* Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
-    pushBus.publishAll(ORCHESTRATION_WS_CHANNELS.domainEvent, event),
-  ).pipe(Effect.forkIn(subscriptionsScope));
-
-  // Streaming fast path: push text deltas directly without orchestration overhead.
-  yield* Stream.runForEach(streamingDeltaBus.stream, (delta) =>
-    pushBus.publishAll(WS_CHANNELS.streamingTextDelta, delta),
-  ).pipe(Effect.forkIn(subscriptionsScope));
-
-  yield* Stream.runForEach(keybindingsManager.streamChanges, (event) =>
-    pushBus.publishAll(WS_CHANNELS.serverConfigUpdated, {
-      issues: event.issues,
-    }),
-  ).pipe(Effect.forkIn(subscriptionsScope));
-
-  yield* Stream.runForEach(serverSettingsManager.streamChanges, (settings) =>
-    pushBus.publishAll(WS_CHANNELS.serverConfigUpdated, {
-      issues: [],
-      settings,
-    }),
-  ).pipe(Effect.forkIn(subscriptionsScope));
-
-  yield* Stream.runForEach(providerRegistry.streamChanges, (providers) =>
-    Effect.gen(function* () {
-      yield* Ref.set(providersRef, providers);
-      yield* pushBus.publishAll(WS_CHANNELS.serverProvidersUpdated, {
-        providers,
-      });
-    }),
-  ).pipe(Effect.forkIn(subscriptionsScope));
-
-  yield* Scope.provide(orchestrationReactor.start, subscriptionsScope);
-  yield* readiness.markOrchestrationSubscriptionsReady;
-
-  let welcomeBootstrapProjectId: ProjectId | undefined;
-  let welcomeBootstrapThreadId: ThreadId | undefined;
-
-  if (autoBootstrapProjectFromCwd) {
-    yield* Effect.gen(function* () {
-      const snapshot = yield* projectionReadModelQuery.getSnapshot();
-      const existingProject = snapshot.projects.find(
-        (project) => project.workspaceRoot === cwd && project.deletedAt === null,
-      );
-      let bootstrapProjectId: ProjectId;
-      let bootstrapProjectDefaultModelSelection;
-
-      if (!existingProject) {
-        const createdAt = new Date().toISOString();
-        bootstrapProjectId = ProjectId.makeUnsafe(crypto.randomUUID());
-        const bootstrapProjectTitle = path.basename(cwd) || "project";
-        bootstrapProjectDefaultModelSelection = {
-          provider: "codex" as const,
-          model: "gpt-5-codex",
-        };
-        yield* orchestrationEngine.dispatch({
-          type: "project.create",
-          commandId: CommandId.makeUnsafe(crypto.randomUUID()),
-          projectId: bootstrapProjectId,
-          title: bootstrapProjectTitle,
-          workspaceRoot: cwd,
-          defaultModelSelection: bootstrapProjectDefaultModelSelection,
-          createdAt,
-        });
-      } else {
-        bootstrapProjectId = existingProject.id;
-        bootstrapProjectDefaultModelSelection = existingProject.defaultModelSelection ?? {
-          provider: "codex" as const,
-          model: "gpt-5-codex",
-        };
-      }
-
-      const existingThread = snapshot.threads.find(
-        (thread) => thread.projectId === bootstrapProjectId && thread.deletedAt === null,
-      );
-      if (!existingThread) {
-        const createdAt = new Date().toISOString();
-        const threadId = ThreadId.makeUnsafe(crypto.randomUUID());
-        yield* orchestrationEngine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.makeUnsafe(crypto.randomUUID()),
-          threadId,
-          projectId: bootstrapProjectId,
-          title: "New thread",
-          modelSelection: bootstrapProjectDefaultModelSelection,
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          createdAt,
-        });
-        welcomeBootstrapProjectId = bootstrapProjectId;
-        welcomeBootstrapThreadId = threadId;
-      } else {
-        welcomeBootstrapProjectId = bootstrapProjectId;
-        welcomeBootstrapThreadId = existingThread.id;
-      }
-    }).pipe(
-      Effect.mapError(
-        (cause) => new ServerLifecycleError({ operation: "autoBootstrapProject", cause }),
-      ),
-    );
-  }
-
-  const runtimeServices = yield* Effect.services<
-    ServerRuntimeServices | ServerConfig | FileSystem.FileSystem | Path.Path
-  >();
-  const runPromise = Effect.runPromiseWith(runtimeServices);
-
-  const unsubscribeTerminalEvents = yield* terminalManager.subscribe(
-    (event) => void Effect.runPromise(pushBus.publishAll(WS_CHANNELS.terminalEvent, event)),
-  );
-  yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
-  yield* readiness.markTerminalSubscriptionsReady;
-
-  yield* NodeHttpServer.make(() => httpServer, listenOptions).pipe(
-    Effect.mapError((cause) => new ServerLifecycleError({ operation: "httpServerListen", cause })),
-  );
-  yield* readiness.markHttpListening;
-
-  yield* Effect.addFinalizer(() =>
-    Effect.all([closeAllClients, closeWebSocketServer.pipe(Effect.ignoreCause({ log: true }))]),
-  );
-
-  const routeRequest = Effect.fnUntraced(function* (ws: WebSocket, request: WebSocketRequest) {
-    switch (request.body._tag) {
-      case ORCHESTRATION_WS_METHODS.getSnapshot:
-        return yield* projectionReadModelQuery.getSnapshot();
-
-      case ORCHESTRATION_WS_METHODS.dispatchCommand: {
-        const { command } = request.body;
-        const normalizedCommand = yield* normalizeDispatchCommand({ command });
-        return yield* orchestrationEngine.dispatch(normalizedCommand);
-      }
-
-      case ORCHESTRATION_WS_METHODS.getTurnDiff: {
-        const body = stripRequestTag(request.body);
-        return yield* checkpointDiffQuery.getTurnDiff(body);
-      }
-
-      case ORCHESTRATION_WS_METHODS.getFullThreadDiff: {
-        const body = stripRequestTag(request.body);
-        return yield* checkpointDiffQuery.getFullThreadDiff(body);
-      }
-
-      case ORCHESTRATION_WS_METHODS.replayEvents: {
-        const { fromSequenceExclusive } = request.body;
-        return yield* Stream.runCollect(
-          orchestrationEngine.readEvents(
-            clamp(fromSequenceExclusive, {
-              maximum: Number.MAX_SAFE_INTEGER,
-              minimum: 0,
-            }),
-          ),
-        ).pipe(Effect.map((events) => Array.from(events)));
-      }
-
-      case WS_METHODS.projectsSearchEntries: {
-        const body = stripRequestTag(request.body);
-        return yield* Effect.tryPromise({
-          try: () => searchWorkspaceEntries(body),
-          catch: (cause) =>
-            new RouteRequestError({
-              message: `Failed to search workspace entries: ${String(cause)}`,
-            }),
-        });
-      }
-
-      case WS_METHODS.projectsWriteFile: {
-        const body = stripRequestTag(request.body);
-        const target = yield* resolveWorkspaceWritePath({
-          workspaceRoot: body.cwd,
-          relativePath: body.relativePath,
-          path,
-        });
-        yield* fileSystem
-          .makeDirectory(path.dirname(target.absolutePath), { recursive: true })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new RouteRequestError({
-                  message: `Failed to prepare workspace path: ${String(cause)}`,
-                }),
-            ),
-          );
-        yield* fileSystem.writeFileString(target.absolutePath, body.contents).pipe(
-          Effect.mapError(
-            (cause) =>
-              new RouteRequestError({
-                message: `Failed to write workspace file: ${String(cause)}`,
-              }),
-          ),
-        );
-        return { relativePath: target.relativePath };
-      }
-
-      case WS_METHODS.projectsReadFile: {
-        const body = stripRequestTag(request.body);
-        const target = yield* resolveWorkspaceWritePath({
-          workspaceRoot: body.cwd,
-          relativePath: body.relativePath,
-          path,
-        });
-        const contents = yield* fileSystem
-          .readFileString(target.absolutePath)
-          .pipe(Effect.catch(() => Effect.succeed(null)));
-        if (contents === null) {
-          return { relativePath: target.relativePath, contents: "", exists: false };
-        }
-        return { relativePath: target.relativePath, contents, exists: true };
-      }
-
-      case WS_METHODS.projectsDeleteFile: {
-        const body = stripRequestTag(request.body);
-        const target = yield* resolveWorkspaceWritePath({
-          workspaceRoot: body.cwd,
-          relativePath: body.relativePath,
-          path,
-        });
-        yield* fileSystem.remove(target.absolutePath).pipe(
-          Effect.mapError(
-            (cause) =>
-              new RouteRequestError({
-                message: `Failed to delete workspace file: ${String(cause)}`,
-              }),
-          ),
-        );
-        return { relativePath: target.relativePath };
-      }
-
-      case WS_METHODS.skillsList: {
-        const body = stripRequestTag(request.body);
-        const skills: Array<{
-          name: string;
-          source: "project" | "user";
-          description: string;
-          content: string;
-        }> = [];
-        const seenNames = new Set<string>();
-
-        /** Scan a directory of subdirectories each containing SKILL.md (SDK/Codex format). */
-        const scanSkillsDir = (dir: string, source: "project" | "user") =>
-          Effect.gen(function* () {
-            const entries = yield* fileSystem
-              .readDirectory(dir)
-              .pipe(Effect.catch(() => Effect.succeed([] as Array<string>)));
-            for (const entry of entries) {
-              const skillMdPath = path.join(dir, entry, "SKILL.md");
-              const content = yield* fileSystem
-                .readFileString(skillMdPath)
-                .pipe(Effect.catch(() => Effect.succeed(null)));
-              if (content === null) continue;
-              const firstLine = content.split("\n").find((l: string) => l.trim().length > 0) ?? "";
-              const key = `${source}:${entry}`;
-              if (!seenNames.has(key)) {
-                seenNames.add(key);
-                skills.push({ name: entry, source, description: firstLine, content });
-              }
-            }
-          });
-
-        /** Scan a directory of flat .md files (Claude Code CLI format: .claude/commands/). */
-        const scanCommandsDir = (dir: string, source: "project" | "user") =>
-          Effect.gen(function* () {
-            const entries = yield* fileSystem
-              .readDirectory(dir)
-              .pipe(Effect.catch(() => Effect.succeed([] as Array<string>)));
-            for (const entry of entries) {
-              if (!entry.endsWith(".md")) continue;
-              const name = entry.slice(0, -3); // strip .md
-              if (!name) continue;
-              const filePath = path.join(dir, entry);
-              const content = yield* fileSystem
-                .readFileString(filePath)
-                .pipe(Effect.catch(() => Effect.succeed(null)));
-              if (content === null) continue;
-              const firstLine = content.split("\n").find((l: string) => l.trim().length > 0) ?? "";
-              const key = `${source}:${name}`;
-              if (!seenNames.has(key)) {
-                seenNames.add(key);
-                skills.push({ name, source, description: firstLine, content });
-              }
-            }
-          });
-
-        // Scan project-level skills (both formats)
-        yield* scanSkillsDir(path.join(body.cwd, ".claude", "skills"), "project");
-        yield* scanCommandsDir(path.join(body.cwd, ".claude", "commands"), "project");
-
-        // Scan user-level skills (both formats)
-        yield* scanSkillsDir(path.join(yield* expandHomePath("~/.claude/skills"), ""), "user").pipe(
-          Effect.catch(() => Effect.void),
-        );
-        yield* scanCommandsDir(
-          path.join(yield* expandHomePath("~/.claude/commands"), ""),
-          "user",
-        ).pipe(Effect.catch(() => Effect.void));
-
-        return { skills };
-      }
-
-      case WS_METHODS.skillsSave: {
-        const body = stripRequestTag(request.body);
-        const homeBase = body.source === "user" ? yield* expandHomePath("~/.claude") : null;
-        const projectBase = path.join(body.cwd, ".claude");
-        const base = homeBase ?? projectBase;
-
-        // Check if the skill already exists in one of the two formats so we
-        // update in-place rather than creating a duplicate in the other format.
-        const existingSkillDir = path.join(base, "skills", body.name, "SKILL.md");
-        const existingCommandFile = path.join(base, "commands", `${body.name}.md`);
-
-        const skillDirExists = yield* fileSystem
-          .readFileString(existingSkillDir)
-          .pipe(Effect.catch(() => Effect.succeed(null)));
-
-        if (skillDirExists !== null) {
-          // Update existing SKILL.md format
-          yield* fileSystem.writeFileString(existingSkillDir, body.content).pipe(
-            Effect.mapError(
-              (cause) =>
-                new RouteRequestError({
-                  message: `Failed to write skill file: ${String(cause)}`,
-                }),
-            ),
-          );
-        } else {
-          // Write as flat .md (Claude Code CLI format) — default for new skills
-          const commandsDir = path.join(base, "commands");
-          yield* fileSystem.makeDirectory(commandsDir, { recursive: true }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new RouteRequestError({
-                  message: `Failed to prepare commands directory: ${String(cause)}`,
-                }),
-            ),
-          );
-          yield* fileSystem.writeFileString(existingCommandFile, body.content).pipe(
-            Effect.mapError(
-              (cause) =>
-                new RouteRequestError({
-                  message: `Failed to write command file: ${String(cause)}`,
-                }),
-            ),
-          );
-        }
-        return { name: body.name };
-      }
-
-      case WS_METHODS.skillsDelete: {
-        const body = stripRequestTag(request.body);
-        const homeBase = body.source === "user" ? yield* expandHomePath("~/.claude") : null;
-        const projectBase = path.join(body.cwd, ".claude");
-        const base = homeBase ?? projectBase;
-
-        // Try deleting from both formats — one will succeed, the other will
-        // silently fail if the path doesn't exist.
-        const skillDir = path.join(base, "skills", body.name);
-        const commandFile = path.join(base, "commands", `${body.name}.md`);
-
-        yield* fileSystem
-          .remove(skillDir, { recursive: true })
-          .pipe(Effect.catch(() => Effect.void));
-        yield* fileSystem.remove(commandFile).pipe(Effect.catch(() => Effect.void));
-
-        return { name: body.name };
-      }
-
-      case WS_METHODS.shellOpenInEditor: {
-        const body = stripRequestTag(request.body);
-        return yield* openInEditor(body);
-      }
-
-      case WS_METHODS.gitStatus: {
-        const body = stripRequestTag(request.body);
-        return yield* gitManager.status(body);
-      }
-
-      case WS_METHODS.gitPull: {
-        const body = stripRequestTag(request.body);
-        return yield* git.pullCurrentBranch(body.cwd);
-      }
-
-      case WS_METHODS.gitRunStackedAction: {
-        const body = stripRequestTag(request.body);
-        return yield* gitManager.runStackedAction(body, {
-          actionId: body.actionId,
-          progressReporter: {
-            publish: (event) =>
-              pushBus.publishClient(ws, WS_CHANNELS.gitActionProgress, event).pipe(Effect.asVoid),
-          },
-        });
-      }
-
-      case WS_METHODS.gitResolvePullRequest: {
-        const body = stripRequestTag(request.body);
-        return yield* gitManager.resolvePullRequest(body);
-      }
-
-      case WS_METHODS.gitPreparePullRequestThread: {
-        const body = stripRequestTag(request.body);
-        return yield* gitManager.preparePullRequestThread(body);
-      }
-
-      case WS_METHODS.gitListBranches: {
-        const body = stripRequestTag(request.body);
-        return yield* git.listBranches(body);
-      }
-
-      case WS_METHODS.gitCreateWorktree: {
-        const body = stripRequestTag(request.body);
-        return yield* git.createWorktree(body);
-      }
-
-      case WS_METHODS.gitRemoveWorktree: {
-        const body = stripRequestTag(request.body);
-        return yield* git.removeWorktree(body);
-      }
-
-      case WS_METHODS.gitCreateBranch: {
-        const body = stripRequestTag(request.body);
-        return yield* git.createBranch(body);
-      }
-
-      case WS_METHODS.gitCheckout: {
-        const body = stripRequestTag(request.body);
-        return yield* Effect.scoped(git.checkoutBranch(body));
-      }
-
-      case WS_METHODS.gitInit: {
-        const body = stripRequestTag(request.body);
-        return yield* git.initRepo(body);
-      }
-
-      case WS_METHODS.terminalOpen: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.open(body);
-      }
-
-      case WS_METHODS.terminalWrite: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.write(body);
-      }
-
-      case WS_METHODS.terminalResize: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.resize(body);
-      }
-
-      case WS_METHODS.terminalClear: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.clear(body);
-      }
-
-      case WS_METHODS.terminalRestart: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.restart(body);
-      }
-
-      case WS_METHODS.terminalClose: {
-        const body = stripRequestTag(request.body);
-        return yield* terminalManager.close(body);
-      }
-
-      case WS_METHODS.mobileRegisterDevice: {
-        const body = stripRequestTag(request.body);
-        const registration = yield* mobileDeviceRegistry.register(body);
-        return { registration };
-      }
-
-      case WS_METHODS.mobileUnregisterDevice: {
-        const body = stripRequestTag(request.body);
-        yield* mobileDeviceRegistry.unregister(body.deviceId);
-        return { deviceId: body.deviceId };
-      }
-
-      case WS_METHODS.mobileGetPushStatus: {
-        const body = stripRequestTag(request.body);
-        const registration = yield* mobileDeviceRegistry.get(body.deviceId);
-        const server = yield* pushDelivery.getStatus();
-        return { registration, server };
-      }
-
-      case WS_METHODS.mobileSendTestNotification: {
-        const body = stripRequestTag(request.body);
-        const queued = yield* pushDelivery.sendTest(body.deviceId);
-        return { queued };
-      }
-
-      case WS_METHODS.serverGetConfig: {
-        const keybindingsConfig = yield* keybindingsManager.loadConfigState;
-        const settings = yield* serverSettingsManager.getSettings;
-        const providers = yield* Ref.get(providersRef);
-        return {
-          cwd,
-          keybindingsConfigPath,
-          keybindings: keybindingsConfig.keybindings,
-          issues: keybindingsConfig.issues,
-          providers,
-          availableEditors,
-          settings,
-        };
-      }
-
-      case WS_METHODS.serverRefreshProviders: {
-        const providers = yield* providerRegistry.refresh();
-        yield* Ref.set(providersRef, providers);
-        return { providers };
-      }
-
-      case WS_METHODS.serverUpsertKeybinding: {
-        const body = stripRequestTag(request.body);
-        const keybindingsConfig = yield* keybindingsManager.upsertKeybindingRule(body);
-        return { keybindings: keybindingsConfig, issues: [] };
-      }
-
-      case WS_METHODS.serverGetSettings: {
-        return yield* serverSettingsManager.getSettings;
-      }
-
-      case WS_METHODS.serverUpdateSettings: {
-        const body = stripRequestTag(request.body);
-        return yield* serverSettingsManager.updateSettings(body.patch);
-      }
-
-      case WS_METHODS.threadsSearch: {
-        const body = stripRequestTag(request.body);
-        const results = yield* threadSearchIndex.search(body);
-        return { results };
-      }
-
-      default: {
-        const _exhaustiveCheck: never = request.body;
-        return yield* new RouteRequestError({
-          message: `Unknown method: ${String(_exhaustiveCheck)}`,
-        });
-      }
-    }
-  });
-
-  const handleMessage = Effect.fnUntraced(function* (ws: WebSocket, raw: unknown) {
-    const sendWsResponse = (response: WsResponseMessage) =>
-      encodeWsResponse(response).pipe(
-        Effect.tap((encodedResponse) => Effect.sync(() => ws.send(encodedResponse))),
-        Effect.asVoid,
-      );
-
-    const messageText = websocketRawToString(raw);
-    if (messageText === null) {
-      return yield* sendWsResponse({
-        id: "unknown",
-        error: { message: "Invalid request format: Failed to read message" },
-      });
-    }
-
-    const request = decodeWebSocketRequest(messageText);
-    if (Result.isFailure(request)) {
-      return yield* sendWsResponse({
-        id: "unknown",
-        error: { message: `Invalid request format: ${formatSchemaError(request.failure)}` },
-      });
-    }
-
-    const result = yield* Effect.exit(routeRequest(ws, request.success));
-    if (Exit.isFailure(result)) {
-      return yield* sendWsResponse({
-        id: request.success.id,
-        error: { message: Cause.pretty(result.cause) },
-      });
-    }
-
-    return yield* sendWsResponse({
-      id: request.success.id,
-      result: result.value,
-    });
-  });
-
-  httpServer.on("upgrade", (request, socket, head) => {
-    socket.on("error", () => {}); // Prevent unhandled `EPIPE`/`ECONNRESET` from crashing the process if the client disconnects mid-handshake
-
-    if (authToken) {
-      let providedToken: string | null = null;
-      try {
-        const url = new URL(request.url ?? "/", `http://localhost:${port}`);
-        providedToken = url.searchParams.get("token");
-      } catch {
-        rejectUpgrade(socket, 400, "Invalid WebSocket URL");
-        return;
-      }
-
-      if (providedToken !== authToken) {
-        rejectUpgrade(socket, 401, "Unauthorized WebSocket connection");
-        return;
-      }
-    }
-
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request);
-    });
-  });
-
-  wss.on("connection", (ws) => {
-    const segments = cwd.split(/[/\\]/).filter(Boolean);
-    const projectName = segments[segments.length - 1] ?? "project";
-
-    const welcomeData = {
-      cwd,
-      projectName,
-      ...(welcomeBootstrapProjectId ? { bootstrapProjectId: welcomeBootstrapProjectId } : {}),
-      ...(welcomeBootstrapThreadId ? { bootstrapThreadId: welcomeBootstrapThreadId } : {}),
-    };
-    // Send welcome before adding to broadcast set so publishAll calls
-    // cannot reach this client before the welcome arrives.
-    void runPromise(
-      readiness.awaitServerReady.pipe(
-        Effect.flatMap(() => pushBus.publishClient(ws, WS_CHANNELS.serverWelcome, welcomeData)),
-        Effect.flatMap((delivered) =>
-          delivered ? Ref.update(clients, (clients) => clients.add(ws)) : Effect.void,
-        ),
-      ),
-    );
-
-    ws.on("message", (raw) => {
-      void runPromise(handleMessage(ws, raw).pipe(Effect.ignoreCause({ log: true })));
-    });
-
-    ws.on("close", () => {
-      void runPromise(
-        Ref.update(clients, (clients) => {
-          clients.delete(ws);
-          return clients;
-        }),
-      );
-    });
-
-    ws.on("error", () => {
-      void runPromise(
-        Ref.update(clients, (clients) => {
-          clients.delete(ws);
-          return clients;
-        }),
-      );
-    });
-  });
-
-  return httpServer;
+  return server;
 });
 
 export const ServerLive = Layer.succeed(Server, {
-  start: createServer(),
+  start: createServer() as ServerShape["start"],
   stopSignal: Effect.never,
 } satisfies ServerShape);
