@@ -1,4 +1,4 @@
-import { MobileNotificationPayload } from "@codeforge/contracts";
+import { MobileNotificationPayload, type MobilePushOutboxStats } from "@codeforge/contracts";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -34,11 +34,22 @@ const DeliveredRequest = Schema.Struct({
   deliveryId: Schema.String,
   deliveredAt: Schema.String,
 });
+const ReplayRequest = Schema.Struct({
+  deliveryId: Schema.String,
+  replayAt: Schema.String,
+});
 const OutboxRow = Schema.Struct({
   deliveryId: Schema.String,
   deviceId: Schema.String,
   notificationJson: Schema.String,
   attemptCount: Schema.Number,
+});
+const StatusRow = Schema.Struct({ status: Schema.String });
+const StatsRow = Schema.Struct({
+  pending: Schema.Number,
+  retry: Schema.Number,
+  dead: Schema.Number,
+  delivered: Schema.Number,
 });
 
 const toOutboxError = (operation: string) => (cause: unknown) =>
@@ -90,6 +101,30 @@ const makePushOutbox = Effect.gen(function* () {
     `,
   });
 
+  const findStatusRows = SqlSchema.findAll({
+    Request: DeliveryIdRequest,
+    Result: StatusRow,
+    execute: ({ deliveryId }) => sql`
+      SELECT status
+      FROM mobile_push_outbox
+      WHERE delivery_id = ${deliveryId}
+      LIMIT 1
+    `,
+  });
+
+  const readStatsRows = SqlSchema.findAll({
+    Request: Schema.Struct({}),
+    Result: StatsRow,
+    execute: () => sql`
+      SELECT
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+        COALESCE(SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END), 0) AS retry,
+        COALESCE(SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END), 0) AS dead,
+        COALESCE(SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END), 0) AS delivered
+      FROM mobile_push_outbox
+    `,
+  });
+
   const markDeliveredRow = SqlSchema.void({
     Request: DeliveredRequest,
     execute: ({ deliveryId, deliveredAt }) => sql`
@@ -127,6 +162,22 @@ const makePushOutbox = Effect.gen(function* () {
         last_error = ${lastError},
         updated_at = ${updatedAt}
       WHERE delivery_id = ${deliveryId}
+    `,
+  });
+
+  const replayDeadRow = SqlSchema.void({
+    Request: ReplayRequest,
+    execute: ({ deliveryId, replayAt }) => sql`
+      UPDATE mobile_push_outbox
+      SET
+        status = 'retry',
+        attempt_count = 0,
+        next_attempt_at = ${replayAt},
+        last_error = NULL,
+        delivered_at = NULL,
+        updated_at = ${replayAt}
+      WHERE delivery_id = ${deliveryId}
+        AND status = 'dead'
     `,
   });
 
@@ -192,7 +243,41 @@ const makePushOutbox = Effect.gen(function* () {
       updatedAt: new Date().toISOString(),
     }).pipe(Effect.mapError(toOutboxError("PushOutbox.markDead")));
 
-  return { enqueue, listDue, markDelivered, markRetry, markDead } satisfies PushOutboxShape;
+  const stats: PushOutboxShape["stats"] = () =>
+    readStatsRows({}).pipe(
+      Effect.mapError(toOutboxError("PushOutbox.stats")),
+      Effect.map((rows): MobilePushOutboxStats => {
+        const row = rows[0];
+        return {
+          pending: row?.pending ?? 0,
+          retry: row?.retry ?? 0,
+          dead: row?.dead ?? 0,
+          delivered: row?.delivered ?? 0,
+        };
+      }),
+    );
+
+  const replayDead: PushOutboxShape["replayDead"] = (deliveryId) =>
+    findStatusRows({ deliveryId }).pipe(
+      Effect.mapError(toOutboxError("PushOutbox.replayDead.lookup")),
+      Effect.flatMap((rows) => {
+        if (rows[0]?.status !== "dead") return Effect.succeed(false);
+        return replayDeadRow({ deliveryId, replayAt: new Date().toISOString() }).pipe(
+          Effect.mapError(toOutboxError("PushOutbox.replayDead.update")),
+          Effect.as(true),
+        );
+      }),
+    );
+
+  return {
+    enqueue,
+    listDue,
+    markDelivered,
+    markRetry,
+    markDead,
+    stats,
+    replayDead,
+  } satisfies PushOutboxShape;
 });
 
 export const PushOutboxLive = Layer.effect(PushOutbox, makePushOutbox);
