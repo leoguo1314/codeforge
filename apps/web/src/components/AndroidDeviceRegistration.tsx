@@ -1,14 +1,17 @@
 import { useEffect } from "react";
 
-import { isAndroidApp, readAndroidDeviceRegistration } from "../androidBridge";
+import {
+  isAndroidApp,
+  onAndroidPushRegistrationChanged,
+  readAndroidDeviceRegistration,
+} from "../androidBridge";
 import { ensureNativeApi } from "../nativeApi";
 import { WS_TRANSPORT_STATE_EVENT, type TransportState } from "../wsTransport";
 
 /**
  * Keeps one Android installation registered with the CodeForge Server.
- * Registration is idempotent and is refreshed whenever the WebSocket becomes
- * open, which also naturally handles provider-token refreshes in a future
- * native FCM/Huawei implementation.
+ * Registration is idempotent and refreshed both when WebSocket connectivity is
+ * restored and when the native push provider rotates its opaque device token.
  */
 export function AndroidDeviceRegistration() {
   useEffect(() => {
@@ -36,17 +39,23 @@ export function AndroidDeviceRegistration() {
 
     void register();
 
-    const onTransportState = (event: Event) => {
-      if (!(event instanceof CustomEvent)) return;
-      const state = event.detail as TransportState | undefined;
-      if (state !== "open") return;
+    const refreshRegistration = () => {
       lastSignature = "";
       void register();
     };
 
+    const onTransportState = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const state = event.detail as TransportState | undefined;
+      if (state !== "open") return;
+      refreshRegistration();
+    };
+
     window.addEventListener(WS_TRANSPORT_STATE_EVENT, onTransportState);
+    const unsubscribePushRegistration = onAndroidPushRegistrationChanged(refreshRegistration);
     return () => {
       disposed = true;
+      unsubscribePushRegistration();
       window.removeEventListener(WS_TRANSPORT_STATE_EVENT, onTransportState);
     };
   }, []);
