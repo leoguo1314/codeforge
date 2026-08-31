@@ -74,6 +74,14 @@ final class PushRegistrationStore {
         );
     }
 
+    static synchronized void clearPushTokenIfProvider(Context context, String provider) {
+        if (TextUtils.isEmpty(provider)) return;
+        SharedPreferences preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String activeProvider = preferences.getString(PREF_PUSH_PROVIDER, "none");
+        if (!TextUtils.equals(provider, activeProvider)) return;
+        clearPushToken(context);
+    }
+
     static String toJson(Context context) {
         SharedPreferences preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String token = preferences.getString(PREF_PUSH_TOKEN, "");
