@@ -35,6 +35,7 @@ import Migration0019 from "./Migrations/019_ThreadSearchFts.ts";
 import Migration0020 from "./Migrations/020_ProjectionProjectsArchivedAt.ts";
 import Migration0021 from "./Migrations/021_MobilePushDevices.ts";
 import Migration0022 from "./Migrations/022_MobilePushOutbox.ts";
+import Migration0023 from "./Migrations/023_MobilePairingSessions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -69,6 +70,7 @@ export const migrationEntries = [
   [20, "ProjectionProjectsArchivedAt", Migration0020],
   [21, "MobilePushDevices", Migration0021],
   [22, "MobilePushOutbox", Migration0022],
+  [23, "MobilePairingSessions", Migration0023],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
