@@ -51,6 +51,12 @@ describe("PushOutbox", () => {
           delivered: 0,
         });
 
+        const deadRows = yield* outbox.list("dead", 50);
+        expect(deadRows).toHaveLength(1);
+        expect(deadRows[0]?.deliveryId).toBe(deadDeliveryId);
+        expect(deadRows[0]?.lastError).toBe("permanent failure");
+        expect(deadRows[0]?.title).toBe("dead letter");
+
         expect(yield* outbox.replayDead("missing-delivery")).toBe(false);
         expect(yield* outbox.replayDead(deadDeliveryId)).toBe(true);
         expect(yield* outbox.stats()).toEqual({
@@ -68,19 +74,33 @@ describe("PushOutbox", () => {
         expect(retryDue.some((item) => item.deliveryId === deliveryId)).toBe(true);
         expect(retryDue.find((item) => item.deliveryId === deliveryId)?.attemptCount).toBe(1);
 
-        yield* outbox.markDelivered(deliveryId, new Date().toISOString());
-        yield* outbox.markDelivered(deadDeliveryId, new Date().toISOString());
+        const deliveredAt = new Date().toISOString();
+        yield* outbox.markDelivered(deliveryId, deliveredAt);
+        yield* outbox.markDelivered(deadDeliveryId, deliveredAt);
         expect(yield* outbox.stats()).toEqual({
           pending: 0,
           retry: 0,
           dead: 0,
           delivered: 2,
         });
-        const afterDelivery = yield* outbox.listDue(
-          new Date(Date.now() + 180_000).toISOString(),
-          10,
-        );
-        expect(afterDelivery).toHaveLength(0);
+        const deliveredRows = yield* outbox.list("delivered", 50);
+        expect(deliveredRows).toHaveLength(2);
+        expect(deliveredRows.every((row) => row.deliveredAt !== null)).toBe(true);
+
+        // Retention only targets terminal states. A future cutoff deterministically
+        // deletes the two delivered rows without touching pending/retry records.
+        const deleted = yield* outbox.purge({
+          deliveredBefore: new Date(Date.now() + 60_000).toISOString(),
+          deadBefore: null,
+        });
+        expect(deleted).toBe(2);
+        expect(yield* outbox.list("all", 50)).toHaveLength(0);
+        expect(yield* outbox.stats()).toEqual({
+          pending: 0,
+          retry: 0,
+          dead: 0,
+          delivered: 0,
+        });
       }).pipe(Effect.provide(testLayer), Effect.scoped),
     );
   });
