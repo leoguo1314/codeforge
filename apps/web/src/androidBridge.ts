@@ -3,10 +3,11 @@ import type { MobileDeviceRegistrationInput, MobilePushProvider } from "@codefor
 import { WS_TRANSPORT_STATE_EVENT, type TransportState } from "./wsTransport";
 
 const ANDROID_SHARE_EVENT = "codeforge:android-share";
+const ANDROID_PUSH_REGISTRATION_EVENT = "codeforge:android-push-registration";
 const ANDROID_DEVICE_ID_STORAGE_KEY = "codeforge.android.deviceId";
 
 export const ANDROID_SHARE_PREFIX = "__CODEFORGE_ANDROID_SHARE_V1__";
-export const ANDROID_CLIENT_VERSION = "0.6.0";
+export const ANDROID_CLIENT_VERSION = "0.7.0";
 
 export type AndroidNotificationKind = "approval" | "complete" | "input" | "info";
 
@@ -48,6 +49,7 @@ declare global {
     CodeForgeAndroid?: AndroidJavascriptBridge;
     __codeforgePendingAndroidShares?: AndroidSharedPayload[];
     __codeforgeReceiveSharedText?: (text: string) => void;
+    __codeforgeAndroidPushRegistrationChanged?: () => void;
   }
 }
 
@@ -163,8 +165,6 @@ export function readAndroidDeviceRegistration(): MobileDeviceRegistrationInput |
     platform: "android",
     pushProvider: native?.pushProvider ?? "none",
     pushToken: native?.pushToken ?? null,
-    // Until a native provider bridge reports BuildConfig.VERSION_NAME, use the
-    // v0.6 mobile contract version rather than the legacy v0.5 User-Agent tag.
     appVersion: native?.appVersion ?? ANDROID_CLIENT_VERSION,
     deviceLabel: native?.deviceLabel ?? "Android device",
   };
@@ -185,6 +185,9 @@ export function installAndroidBridge(): void {
     window.__codeforgePendingAndroidShares?.push(payload);
     window.dispatchEvent(new CustomEvent<AndroidSharedPayload>(ANDROID_SHARE_EVENT, { detail: payload }));
   };
+  window.__codeforgeAndroidPushRegistrationChanged = () => {
+    window.dispatchEvent(new Event(ANDROID_PUSH_REGISTRATION_EVENT));
+  };
 
   window.addEventListener(WS_TRANSPORT_STATE_EVENT, (event) => {
     if (!(event instanceof CustomEvent)) return;
@@ -196,6 +199,12 @@ export function installAndroidBridge(): void {
       // Native shell status is best-effort and must never affect transport.
     }
   });
+}
+
+export function onAndroidPushRegistrationChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  window.addEventListener(ANDROID_PUSH_REGISTRATION_EVENT, listener);
+  return () => window.removeEventListener(ANDROID_PUSH_REGISTRATION_EVENT, listener);
 }
 
 export function consumePendingAndroidShares(): AndroidSharedPayload[] {
