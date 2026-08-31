@@ -13,7 +13,8 @@
     "src/mobile/Services/**/*.ts",
     "src/mobile/Layers/**/*.ts",
     "src/persistence/Migrations/021_MobilePushDevices.ts",
-    "src/persistence/Migrations/022_MobilePushOutbox.ts"
+    "src/persistence/Migrations/022_MobilePushOutbox.ts",
+    "src/persistence/Migrations/023_MobilePairingSessions.ts"
   ],
   "exclude": ["**/*.test.ts"]
 }
