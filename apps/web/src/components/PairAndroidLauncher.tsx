@@ -1,8 +1,9 @@
-import { CheckIcon, CopyIcon, SmartphoneIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckIcon, CopyIcon, RefreshCwIcon, SmartphoneIcon } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import { isAndroidApp } from "../androidBridge";
 import { createQrMatrix, qrMatrixToPath } from "../lib/qrCode";
+import { ensureNativeApi } from "../nativeApi";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -22,11 +23,6 @@ const initialServerUrl = (): string => {
     : "";
 };
 
-const initialAuthToken = (): string => {
-  if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("token") ?? "";
-};
-
 const normalizeServerUrl = (value: string): string | null => {
   const candidate = value.trim();
   if (!candidate) return null;
@@ -44,7 +40,6 @@ const copyText = async (value: string): Promise<void> => {
     await navigator.clipboard.writeText(value);
     return;
   }
-
   const textarea = document.createElement("textarea");
   textarea.value = value;
   textarea.setAttribute("readonly", "true");
@@ -57,22 +52,33 @@ const copyText = async (value: string): Promise<void> => {
   if (!copied) throw new Error("Clipboard is unavailable.");
 };
 
+const remainingLabel = (expiresAt: string | null, now: number): string => {
+  if (!expiresAt) return "";
+  const remaining = Math.max(0, Date.parse(expiresAt) - now);
+  if (remaining <= 0) return "Expired";
+  const seconds = Math.ceil(remaining / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+};
+
 export function PairAndroidLauncher() {
   const [open, setOpen] = useState(false);
   const [serverUrl, setServerUrl] = useState(initialServerUrl);
-  const [authToken, setAuthToken] = useState(initialAuthToken);
+  const [pairCode, setPairCode] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [now, setNow] = useState(() => Date.now());
 
   const normalizedServerUrl = useMemo(() => normalizeServerUrl(serverUrl), [serverUrl]);
+  const expired = expiresAt ? Date.parse(expiresAt) <= now : false;
   const pairingLink = useMemo(() => {
-    if (!normalizedServerUrl) return "";
+    if (!normalizedServerUrl || !pairCode || expired) return "";
     const url = new URL("codeforge://connect");
     url.searchParams.set("server", normalizedServerUrl);
-    if (authToken.trim()) {
-      url.searchParams.set("token", authToken.trim());
-    }
+    url.searchParams.set("pair", pairCode);
     return url.toString();
-  }, [authToken, normalizedServerUrl]);
+  }, [expired, normalizedServerUrl, pairCode]);
 
   const qrCode = useMemo(() => {
     if (!pairingLink) return { path: "", viewBoxSize: 0, error: null as string | null };
@@ -80,16 +86,44 @@ export function PairAndroidLauncher() {
       const matrix = createQrMatrix(pairingLink);
       const rendered = qrMatrixToPath(matrix);
       return { ...rendered, error: null as string | null };
-    } catch (error) {
+    } catch (cause) {
       return {
         path: "",
         viewBoxSize: 0,
-        error: error instanceof Error ? error.message : "Could not generate QR code.",
+        error: cause instanceof Error ? cause.message : "Could not generate QR code.",
       };
     }
   }, [pairingLink]);
 
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [open]);
+
   if (isAndroidApp()) return null;
+
+  const generate = async () => {
+    if (!normalizedServerUrl) {
+      setError("Enter a valid HTTP or HTTPS server URL first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setCopyState("idle");
+    try {
+      const result = await ensureNativeApi().mobile.createPairingCode();
+      setPairCode(result.code);
+      setExpiresAt(result.expiresAt);
+      setNow(Date.now());
+    } catch (cause) {
+      setPairCode(null);
+      setExpiresAt(null);
+      setError(cause instanceof Error ? cause.message : "Could not create a pairing code.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleCopy = async () => {
     if (!pairingLink) return;
@@ -107,6 +141,7 @@ export function PairAndroidLauncher() {
       open={open}
       onOpenChange={(nextOpen) => {
         setOpen(nextOpen);
+        if (nextOpen && !pairCode && !loading) void generate();
         if (!nextOpen) setCopyState("idle");
       }}
     >
@@ -127,8 +162,8 @@ export function PairAndroidLauncher() {
         <DialogHeader>
           <DialogTitle>Pair Android</DialogTitle>
           <DialogDescription>
-            Generate the Android pairing QR entirely inside CodeForge. The server address and token
-            are never sent to a third-party QR service.
+            Generate a short-lived, single-use Android pairing code. The QR no longer contains the
+            long-lived CodeForge server token.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -138,7 +173,10 @@ export function PairAndroidLauncher() {
               value={serverUrl}
               onChange={(event) => {
                 setServerUrl(event.target.value);
+                setPairCode(null);
+                setExpiresAt(null);
                 setCopyState("idle");
+                setError(null);
               }}
               placeholder="https://codeforge.example.com"
               inputMode="url"
@@ -149,25 +187,22 @@ export function PairAndroidLauncher() {
             ) : null}
           </label>
 
-          <label className="block space-y-1.5">
-            <span className="text-xs font-medium text-foreground">WebSocket auth token</span>
-            <input
-              value={authToken}
-              onChange={(event) => {
-                setAuthToken(event.target.value);
-                setCopyState("idle");
-              }}
-              placeholder="Paste the token used by --auth-token"
-              type="password"
-              autoComplete="off"
-              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
-            />
-          </label>
+          <div className="flex items-center justify-between rounded-lg border bg-muted/25 px-3 py-2 text-xs">
+            <div>
+              <div className="font-medium text-foreground">One-time pairing code</div>
+              <div className="font-mono text-muted-foreground">
+                {pairCode ? `${pairCode.slice(0, 6)}…${pairCode.slice(-4)}` : "Not generated"}
+              </div>
+            </div>
+            <div className={expired ? "font-medium text-destructive" : "text-muted-foreground"}>
+              {expiresAt ? remainingLabel(expiresAt, now) : "2 min TTL"}
+            </div>
+          </div>
 
           {pairingLink && qrCode.path ? (
             <div className="flex justify-center rounded-xl border bg-white p-4">
               <svg
-                aria-label="CodeForge Android pairing QR code"
+                aria-label="CodeForge Android one-time pairing QR code"
                 className="size-56 max-w-full"
                 role="img"
                 shapeRendering="crispEdges"
@@ -183,17 +218,29 @@ export function PairAndroidLauncher() {
             </div>
           ) : null}
 
+          {expired ? (
+            <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 p-3 text-xs text-muted-foreground">
+              This pairing code expired. Generate a new code before scanning.
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs text-destructive">
+              {error}
+            </div>
+          ) : null}
+
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-foreground">Pairing link</span>
             <div className="max-h-28 overflow-auto rounded-lg border bg-muted/35 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground break-all">
-              {pairingLink || "Enter a valid server URL to generate the pairing link."}
+              {pairingLink || "Generate a valid one-time code to create the pairing link."}
             </div>
           </div>
 
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 p-3 text-xs leading-relaxed text-muted-foreground">
-            Treat this QR/link as a credential when it contains a token. Scan it only with the
-            CodeForge Android device you intend to pair. v0.4 renders the QR locally in this page;
-            no external QR endpoint is contacted.
+          <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/8 p-3 text-xs leading-relaxed text-muted-foreground">
+            The QR contains only the server address and a single-use code valid for about two
+            minutes. Android redeems it for a device session; the administrator auth token never
+            enters the QR or clipboard.
           </div>
         </DialogPanel>
         <DialogFooter>
@@ -202,6 +249,10 @@ export function PairAndroidLauncher() {
               Clipboard unavailable. Select and copy the link manually.
             </span>
           ) : null}
+          <Button variant="outline" onClick={() => void generate()} disabled={loading || !normalizedServerUrl}>
+            <RefreshCwIcon className={loading ? "animate-spin" : ""} />
+            {pairCode ? "New code" : "Generate"}
+          </Button>
           <Button onClick={() => void handleCopy()} disabled={!pairingLink}>
             {copyState === "copied" ? <CheckIcon /> : <CopyIcon />}
             {copyState === "copied" ? "Copied" : "Copy pairing link"}
