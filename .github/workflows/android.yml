@@ -32,6 +32,8 @@ on:
       - "packages/contracts/src/ipc.ts"
       - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
+      - "scripts/mobile-push-gateway.mjs"
+      - "scripts/mobile-push-gateway.test.mjs"
       - "turbo.json"
       - ".github/workflows/android.yml"
   pull_request:
@@ -65,6 +67,8 @@ on:
       - "packages/contracts/src/ipc.ts"
       - "packages/contracts/src/mobile.ts"
       - "packages/contracts/src/ws.ts"
+      - "scripts/mobile-push-gateway.mjs"
+      - "scripts/mobile-push-gateway.test.mjs"
       - "turbo.json"
       - ".github/workflows/android.yml"
 
@@ -85,6 +89,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Test push gateway provider payloads
+        run: node --test scripts/mobile-push-gateway.test.mjs
 
       - name: Test Android web integration
         run: bun run --cwd apps/web test -- src/wsTransport.test.ts src/wsTransport.mobile.test.ts src/androidBridge.test.ts src/lib/qrCode.test.ts
