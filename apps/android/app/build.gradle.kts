@@ -15,8 +15,8 @@ android {
         applicationId = "ai.codeforge.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 8
+        versionName = "0.8.0"
         manifestPlaceholders["usesCleartextTraffic"] = "false"
 
         // Firebase project configuration is intentionally injected at build time.
@@ -40,6 +40,14 @@ android {
             "String",
             "FIREBASE_SENDER_ID",
             quotedBuildConfig(buildEnv("CODEFORGE_FIREBASE_SENDER_ID")),
+        )
+
+        // Huawei Push Kit can also be configured without committing an
+        // agconnect-services.json file. The App ID is injected by the build.
+        buildConfigField(
+            "String",
+            "HUAWEI_APP_ID",
+            quotedBuildConfig(buildEnv("CODEFORGE_HUAWEI_APP_ID")),
         )
     }
 
@@ -67,4 +75,5 @@ dependencies {
     implementation("androidx.core:core:1.16.0")
     implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
     implementation("com.google.firebase:firebase-messaging")
+    implementation("com.huawei.hms:push:6.13.0.300")
 }
