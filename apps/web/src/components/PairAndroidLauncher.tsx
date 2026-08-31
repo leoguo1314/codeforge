@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { isAndroidApp } from "../androidBridge";
 import { createQrMatrix, qrMatrixToPath } from "../lib/qrCode";
-import { ensureNativeApi } from "../nativeApi";
+import { createMobilePairingCode } from "../mobileAdminHttp";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -112,7 +112,7 @@ export function PairAndroidLauncher() {
     setError(null);
     setCopyState("idle");
     try {
-      const result = await ensureNativeApi().mobile.createPairingCode();
+      const result = await createMobilePairingCode();
       setPairCode(result.code);
       setExpiresAt(result.expiresAt);
       setNow(Date.now());
@@ -249,7 +249,11 @@ export function PairAndroidLauncher() {
               Clipboard unavailable. Select and copy the link manually.
             </span>
           ) : null}
-          <Button variant="outline" onClick={() => void generate()} disabled={loading || !normalizedServerUrl}>
+          <Button
+            variant="outline"
+            onClick={() => void generate()}
+            disabled={loading || !normalizedServerUrl}
+          >
             <RefreshCwIcon className={loading ? "animate-spin" : ""} />
             {pairCode ? "New code" : "Generate"}
           </Button>
