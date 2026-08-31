@@ -67,7 +67,14 @@ import type {
   MobileDeviceRegistrationInput,
   MobileGetPushStatusInput,
   MobileGetPushStatusResult,
+  MobileListPushOutboxInput,
+  MobileListPushOutboxResult,
+  MobilePairingCreateResult,
+  MobilePurgePushOutboxInput,
+  MobilePurgePushOutboxResult,
   MobileRegisterDeviceResult,
+  MobileReplayDeadPushInput,
+  MobileReplayDeadPushResult,
   MobileSendTestNotificationInput,
   MobileSendTestNotificationResult,
   MobileUnregisterDeviceInput,
@@ -118,12 +125,6 @@ export interface DesktopUpdateState {
   canRetry: boolean;
 }
 
-export interface DesktopUpdateActionResult {
-  accepted: boolean;
-  completed: boolean;
-  state: DesktopUpdateState;
-}
-
 export interface DesktopBridge {
   getWsUrl: () => string | null;
   pickFolder: () => Promise<string | null>;
@@ -139,6 +140,12 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+}
+
+export interface DesktopUpdateActionResult {
+  accepted: boolean;
+  completed: boolean;
+  state: DesktopUpdateState;
 }
 
 export interface NativeApi {
@@ -202,6 +209,10 @@ export interface NativeApi {
     sendTestNotification: (
       input: MobileSendTestNotificationInput,
     ) => Promise<MobileSendTestNotificationResult>;
+    createPairingCode: () => Promise<MobilePairingCreateResult>;
+    listPushOutbox: (input: MobileListPushOutboxInput) => Promise<MobileListPushOutboxResult>;
+    replayDeadPush: (input: MobileReplayDeadPushInput) => Promise<MobileReplayDeadPushResult>;
+    purgePushOutbox: (input: MobilePurgePushOutboxInput) => Promise<MobilePurgePushOutboxResult>;
   };
   server: {
     getConfig: () => Promise<ServerConfig>;
