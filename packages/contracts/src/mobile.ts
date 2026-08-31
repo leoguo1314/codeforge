@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-import { IsoDateTime, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas";
+import { IsoDateTime, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 
 export const MobileDevicePlatform = Schema.Literals(["android"]);
 export type MobileDevicePlatform = typeof MobileDevicePlatform.Type;
@@ -96,3 +96,73 @@ export const MobileReplayDeadPushResult = Schema.Struct({
   replayed: Schema.Boolean,
 });
 export type MobileReplayDeadPushResult = typeof MobileReplayDeadPushResult.Type;
+
+export const MobilePairingCreateResult = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  expiresAt: IsoDateTime,
+});
+export type MobilePairingCreateResult = typeof MobilePairingCreateResult.Type;
+
+export const MobilePairingRedeemInput = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  deviceId: TrimmedNonEmptyString,
+  deviceLabel: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type MobilePairingRedeemInput = typeof MobilePairingRedeemInput.Type;
+
+export const MobilePairingRedeemResult = Schema.Struct({
+  sessionToken: TrimmedNonEmptyString,
+  expiresAt: IsoDateTime,
+});
+export type MobilePairingRedeemResult = typeof MobilePairingRedeemResult.Type;
+
+export const MobilePushOutboxStatus = Schema.Literals(["pending", "retry", "dead", "delivered"]);
+export type MobilePushOutboxStatus = typeof MobilePushOutboxStatus.Type;
+export const MobilePushOutboxStatusFilter = Schema.Literals([
+  "all",
+  "pending",
+  "retry",
+  "dead",
+  "delivered",
+]);
+export type MobilePushOutboxStatusFilter = typeof MobilePushOutboxStatusFilter.Type;
+
+export const MobilePushOutboxEntry = Schema.Struct({
+  deliveryId: TrimmedNonEmptyString,
+  deviceId: TrimmedNonEmptyString,
+  status: MobilePushOutboxStatus,
+  attemptCount: NonNegativeInt,
+  nextAttemptAt: IsoDateTime,
+  lastError: Schema.NullOr(Schema.String),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  deliveredAt: Schema.NullOr(IsoDateTime),
+  notificationKind: Schema.Literals(["approval", "input", "complete", "info"]),
+  threadId: Schema.NullOr(ThreadId),
+  title: TrimmedNonEmptyString,
+  body: TrimmedNonEmptyString,
+  notificationCreatedAt: IsoDateTime,
+});
+export type MobilePushOutboxEntry = typeof MobilePushOutboxEntry.Type;
+
+export const MobileListPushOutboxInput = Schema.Struct({
+  status: MobilePushOutboxStatusFilter,
+  limit: NonNegativeInt,
+});
+export type MobileListPushOutboxInput = typeof MobileListPushOutboxInput.Type;
+
+export const MobileListPushOutboxResult = Schema.Struct({
+  entries: Schema.Array(MobilePushOutboxEntry),
+});
+export type MobileListPushOutboxResult = typeof MobileListPushOutboxResult.Type;
+
+export const MobilePurgePushOutboxInput = Schema.Struct({
+  deliveredBefore: Schema.NullOr(IsoDateTime),
+  deadBefore: Schema.NullOr(IsoDateTime),
+});
+export type MobilePurgePushOutboxInput = typeof MobilePurgePushOutboxInput.Type;
+
+export const MobilePurgePushOutboxResult = Schema.Struct({
+  deleted: NonNegativeInt,
+});
+export type MobilePurgePushOutboxResult = typeof MobilePurgePushOutboxResult.Type;
