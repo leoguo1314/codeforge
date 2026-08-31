@@ -96,7 +96,7 @@ jobs:
         run: bun run --cwd packages/contracts typecheck
 
       - name: Typecheck mobile server modules
-        run: bun x --package typescript tsc -p apps/server/tsconfig.mobile.json --noEmit
+        run: bun x --package typescript@5.7.3 tsc -p apps/server/tsconfig.mobile.json --noEmit
 
       - name: Test mobile server notification, push bus, outbox, and delivery wiring
         run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts src/mobile/PushOutbox.test.ts
