@@ -3,7 +3,6 @@
   "compilerOptions": {
     "composite": false,
     "types": ["node"],
-    "baseUrl": ".",
     "paths": {
       "@codeforge/contracts": ["../../packages/contracts/src/index.ts"],
       "@codeforge/contracts/*": ["../../packages/contracts/src/*"]
