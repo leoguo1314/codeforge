@@ -3,6 +3,11 @@ import { DatabaseIcon, RefreshCwIcon, RotateCcwIcon, Trash2Icon } from "lucide-r
 import { useState } from "react";
 
 import { isAndroidApp } from "../androidBridge";
+import {
+  listMobilePushOutbox,
+  purgeMobilePushOutbox,
+  replayMobileDeadPush,
+} from "../mobileAdminHttp";
 import { ensureNativeApi } from "../nativeApi";
 import { Button } from "./ui/button";
 import {
@@ -47,10 +52,7 @@ export function MobilePushOpsLauncher() {
     setLoading(true);
     setMessage(null);
     try {
-      const result = await ensureNativeApi().mobile.listPushOutbox({
-        status: nextFilter,
-        limit: 50,
-      });
+      const result = await listMobilePushOutbox({ status: nextFilter, limit: 50 });
       setEntries(result.entries);
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "Could not load push outbox.");
@@ -63,8 +65,12 @@ export function MobilePushOpsLauncher() {
     setActionId(deliveryId);
     setMessage(null);
     try {
-      const result = await ensureNativeApi().mobile.replayDeadPush({ deliveryId });
-      setMessage(result.replayed ? "Dead-letter delivery queued for replay." : "Delivery is no longer dead.");
+      const result = await replayMobileDeadPush({ deliveryId });
+      setMessage(
+        result.replayed
+          ? "Dead-letter delivery queued for replay."
+          : "Delivery is no longer dead.",
+      );
       await refresh();
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "Could not replay delivery.");
@@ -83,11 +89,13 @@ export function MobilePushOpsLauncher() {
     setActionId(`purge:${kind}`);
     setMessage(null);
     try {
-      const result = await ensureNativeApi().mobile.purgePushOutbox({
+      const result = await purgeMobilePushOutbox({
         deliveredBefore: kind === "delivered" ? cutoffIso(days) : null,
         deadBefore: kind === "dead" ? cutoffIso(days) : null,
       });
-      setMessage(`Deleted ${result.deleted} ${kind} push record${result.deleted === 1 ? "" : "s"}.`);
+      setMessage(
+        `Deleted ${result.deleted} ${kind} push record${result.deleted === 1 ? "" : "s"}.`,
+      );
       await refresh();
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "Could not clean push outbox.");
@@ -184,7 +192,9 @@ export function MobilePushOpsLauncher() {
                       onClick={() => void replay(entry.deliveryId)}
                       disabled={actionId === entry.deliveryId}
                     >
-                      <RotateCcwIcon className={actionId === entry.deliveryId ? "animate-spin" : ""} />
+                      <RotateCcwIcon
+                        className={actionId === entry.deliveryId ? "animate-spin" : ""}
+                      />
                       Replay
                     </Button>
                   ) : null}
@@ -194,7 +204,9 @@ export function MobilePushOpsLauncher() {
           </div>
 
           {message ? (
-            <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">{message}</div>
+            <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+              {message}
+            </div>
           ) : null}
         </DialogPanel>
         <DialogFooter>
