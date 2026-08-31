@@ -21,6 +21,7 @@ on:
       - "apps/server/src/mobile/**"
       - "apps/server/src/persistence/Migrations.ts"
       - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
+      - "apps/server/src/persistence/Migrations/022_MobilePushOutbox.ts"
       - "apps/server/src/serverLayers.ts"
       - "apps/server/src/wsServer.ts"
       - "apps/server/src/wsServer/pushBus.ts"
@@ -52,6 +53,7 @@ on:
       - "apps/server/src/mobile/**"
       - "apps/server/src/persistence/Migrations.ts"
       - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
+      - "apps/server/src/persistence/Migrations/022_MobilePushOutbox.ts"
       - "apps/server/src/serverLayers.ts"
       - "apps/server/src/wsServer.ts"
       - "apps/server/src/wsServer/pushBus.ts"
@@ -91,8 +93,11 @@ jobs:
       - name: Typecheck shared contracts
         run: bun run --cwd packages/contracts typecheck
 
-      - name: Test mobile server notification, push bus, and delivery wiring
-        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts
+      - name: Typecheck server
+        run: bun run --cwd apps/server typecheck
+
+      - name: Test mobile server notification, push bus, outbox, and delivery wiring
+        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts src/mobile/PushOutbox.test.ts
 
   build-debug-apk:
     runs-on: ubuntu-latest
