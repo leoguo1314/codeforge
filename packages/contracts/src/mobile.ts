@@ -53,11 +53,20 @@ export type MobileGetPushStatusInput = typeof MobileGetPushStatusInput.Type;
 export const MobilePushDeliveryAdapterKind = Schema.Literals(["disabled", "http-gateway"]);
 export type MobilePushDeliveryAdapterKind = typeof MobilePushDeliveryAdapterKind.Type;
 
+export const MobilePushOutboxStats = Schema.Struct({
+  pending: NonNegativeInt,
+  retry: NonNegativeInt,
+  dead: NonNegativeInt,
+  delivered: NonNegativeInt,
+});
+export type MobilePushOutboxStats = typeof MobilePushOutboxStats.Type;
+
 export const MobilePushServerStatus = Schema.Struct({
   configured: Schema.Boolean,
   adapter: MobilePushDeliveryAdapterKind,
   registeredDevices: NonNegativeInt,
   pushCapableDevices: NonNegativeInt,
+  outbox: MobilePushOutboxStats,
 });
 export type MobilePushServerStatus = typeof MobilePushServerStatus.Type;
 
@@ -76,3 +85,14 @@ export const MobileSendTestNotificationResult = Schema.Struct({
   queued: Schema.Boolean,
 });
 export type MobileSendTestNotificationResult = typeof MobileSendTestNotificationResult.Type;
+
+export const MobileReplayDeadPushInput = Schema.Struct({
+  deliveryId: TrimmedNonEmptyString,
+});
+export type MobileReplayDeadPushInput = typeof MobileReplayDeadPushInput.Type;
+
+export const MobileReplayDeadPushResult = Schema.Struct({
+  deliveryId: TrimmedNonEmptyString,
+  replayed: Schema.Boolean,
+});
+export type MobileReplayDeadPushResult = typeof MobileReplayDeadPushResult.Type;
