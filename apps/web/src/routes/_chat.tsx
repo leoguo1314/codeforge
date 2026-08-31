@@ -5,6 +5,7 @@ import { useEffect } from "react";
 
 import ThreadSidebar from "../components/Sidebar";
 import { AndroidDeviceRegistration } from "../components/AndroidDeviceRegistration";
+import { MobilePushOpsLauncher } from "../components/MobilePushOpsLauncher";
 import { PairAndroidLauncher } from "../components/PairAndroidLauncher";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -134,6 +135,7 @@ function ChatRouteLayout() {
       </Sidebar>
       <Outlet />
       <PairAndroidLauncher />
+      <MobilePushOpsLauncher />
     </SidebarProvider>
   );
 }
