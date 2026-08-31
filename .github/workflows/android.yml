@@ -8,9 +8,11 @@ on:
       - "apps/web/src/androidBridge.test.ts"
       - "apps/web/src/components/AndroidDeviceRegistration.tsx"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
+      - "apps/web/src/components/MobilePushOpsLauncher.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/lib/qrCode.ts"
       - "apps/web/src/lib/qrCode.test.ts"
+      - "apps/web/src/mobileAdminHttp.ts"
       - "apps/web/src/routes/_chat.tsx"
       - "apps/web/src/routes/_chat.$threadId.tsx"
       - "apps/web/src/main.tsx"
@@ -22,8 +24,10 @@ on:
       - "apps/server/src/persistence/Migrations.ts"
       - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
       - "apps/server/src/persistence/Migrations/022_MobilePushOutbox.ts"
+      - "apps/server/src/persistence/Migrations/023_MobilePairingSessions.ts"
       - "apps/server/src/serverLayers.ts"
       - "apps/server/src/wsServer.ts"
+      - "apps/server/src/wsServerCore.ts"
       - "apps/server/src/wsServer/pushBus.ts"
       - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
@@ -43,9 +47,11 @@ on:
       - "apps/web/src/androidBridge.test.ts"
       - "apps/web/src/components/AndroidDeviceRegistration.tsx"
       - "apps/web/src/components/AndroidThreadIntegration.tsx"
+      - "apps/web/src/components/MobilePushOpsLauncher.tsx"
       - "apps/web/src/components/PairAndroidLauncher.tsx"
       - "apps/web/src/lib/qrCode.ts"
       - "apps/web/src/lib/qrCode.test.ts"
+      - "apps/web/src/mobileAdminHttp.ts"
       - "apps/web/src/routes/_chat.tsx"
       - "apps/web/src/routes/_chat.$threadId.tsx"
       - "apps/web/src/main.tsx"
@@ -57,8 +63,10 @@ on:
       - "apps/server/src/persistence/Migrations.ts"
       - "apps/server/src/persistence/Migrations/021_MobilePushDevices.ts"
       - "apps/server/src/persistence/Migrations/022_MobilePushOutbox.ts"
+      - "apps/server/src/persistence/Migrations/023_MobilePairingSessions.ts"
       - "apps/server/src/serverLayers.ts"
       - "apps/server/src/wsServer.ts"
+      - "apps/server/src/wsServerCore.ts"
       - "apps/server/src/wsServer/pushBus.ts"
       - "apps/server/src/wsServer/pushBus.test.ts"
       - "apps/server/src/wsServer/mobileNotifications.ts"
@@ -105,8 +113,11 @@ jobs:
       - name: Typecheck mobile server modules
         run: bun x --package typescript@5.7.3 tsc -p apps/server/tsconfig.mobile.json --noEmit
 
-      - name: Test mobile server notification, push bus, outbox, and delivery wiring
-        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts src/mobile/PushOutbox.test.ts
+      - name: Test mobile server pairing, notification, push bus, outbox, and delivery wiring
+        run: bun run --cwd apps/server test -- src/wsServer/mobileNotifications.test.ts src/wsServer/pushBus.test.ts src/mobile/mobileWiring.test.ts src/mobile/MobilePairing.test.ts src/mobile/PushOutbox.test.ts
+
+      - name: Build CodeForge server
+        run: bun run --cwd apps/server build
 
   build-debug-apk:
     runs-on: ubuntu-latest
