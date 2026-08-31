@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@codeforge/contracts": ["../../packages/contracts/src/index.ts"],
+      "@codeforge/contracts/*": ["../../packages/contracts/src/*"]
+    },
+    "noEmit": true
+  },
+  "include": [
+    "src/mobile/Services/**/*.ts",
+    "src/mobile/Layers/**/*.ts",
+    "src/persistence/Migrations/021_MobilePushDevices.ts",
+    "src/persistence/Migrations/022_MobilePushOutbox.ts"
+  ],
+  "exclude": ["**/*.test.ts"]
+}
