@@ -3,15 +3,16 @@ import type {
   MobileNotificationPayload,
   MobilePushServerStatus,
 } from "@codeforge/contracts";
-import { Effect, Layer, Queue } from "effect";
+import { Effect, Layer } from "effect";
 
 import { MobileDeviceRegistry } from "../Services/MobileDeviceRegistry.ts";
 import { PushDeliveryService, type PushDeliveryShape } from "../Services/PushDelivery.ts";
+import { PushOutbox } from "../Services/PushOutbox.ts";
 
-type DeliveryJob = {
-  readonly notification: MobileNotificationPayload;
-  readonly targetDeviceId: string | null;
-};
+const DELIVERY_BATCH_SIZE = 20;
+const DELIVERY_POLL_INTERVAL_MS = 1_000;
+const MAX_ATTEMPTS = 6;
+const RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000] as const;
 
 type GatewayConfig = {
   readonly url: string;
@@ -37,8 +38,22 @@ const resolveGatewayConfig = (): GatewayConfig | null => {
   }
 };
 
+const sleep = (milliseconds: number) =>
+  Effect.promise<void>(() => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+
+const errorSummary = (cause: unknown): string => {
+  const value = cause instanceof Error ? cause.message : String(cause);
+  return value.length > 500 ? `${value.slice(0, 497)}...` : value;
+};
+
+const retryDelayMs = (attemptCount: number): number =>
+  RETRY_DELAYS_MS[Math.min(Math.max(attemptCount - 1, 0), RETRY_DELAYS_MS.length - 1)] ??
+  RETRY_DELAYS_MS.at(-1)!;
+
 const sendToGateway = (
   config: GatewayConfig,
+  deliveryId: string,
+  attempt: number,
   device: MobileDeviceRegistration,
   notification: MobileNotificationPayload,
 ) =>
@@ -49,7 +64,8 @@ const sendToGateway = (
       try {
         const headers: Record<string, string> = {
           "content-type": "application/json",
-          "user-agent": "CodeForge-PushDelivery/0.6",
+          "user-agent": "CodeForge-PushDelivery/0.7",
+          "idempotency-key": deliveryId,
         };
         if (config.authorization) {
           headers.authorization = config.authorization;
@@ -60,7 +76,9 @@ const sendToGateway = (
           headers,
           signal: controller.signal,
           body: JSON.stringify({
-            version: 1,
+            version: 2,
+            deliveryId,
+            attempt,
             device: {
               deviceId: device.deviceId,
               platform: device.platform,
@@ -84,10 +102,13 @@ const sendToGateway = (
 
 const makePushDelivery = Effect.gen(function* () {
   const registry = yield* MobileDeviceRegistry;
-  const queue = yield* Queue.unbounded<DeliveryJob>();
+  const outbox = yield* PushOutbox;
   const gateway = resolveGatewayConfig();
 
-  const deliverJob = (job: DeliveryJob) =>
+  const persistNotification = (
+    notification: MobileNotificationPayload,
+    targetDeviceId?: string,
+  ) =>
     Effect.gen(function* () {
       if (!gateway) return;
 
@@ -96,41 +117,93 @@ const makePushDelivery = Effect.gen(function* () {
         (device) =>
           device.pushProvider !== "none" &&
           device.pushToken !== null &&
-          (job.targetDeviceId === null || device.deviceId === job.targetDeviceId),
+          (targetDeviceId === undefined || device.deviceId === targetDeviceId),
       );
 
-      yield* Effect.forEach(
-        devices,
-        (device) =>
-          sendToGateway(gateway, device, job.notification).pipe(
-            Effect.tapError((cause) =>
-              Effect.logWarning("mobile push gateway delivery failed", {
-                deviceId: device.deviceId,
-                provider: device.pushProvider,
-                cause,
-              }),
-            ),
-            Effect.ignore,
-          ),
-        { concurrency: 4 },
+      yield* Effect.forEach(devices, (device) => outbox.enqueue(device.deviceId, notification), {
+        concurrency: 1,
+        discard: true,
+      });
+    });
+
+  const deliverOne = (item: {
+    readonly deliveryId: string;
+    readonly deviceId: string;
+    readonly notification: MobileNotificationPayload;
+    readonly attemptCount: number;
+  }) =>
+    Effect.gen(function* () {
+      if (!gateway) return;
+
+      const device = yield* registry.get(item.deviceId);
+      const nextAttempt = item.attemptCount + 1;
+      if (!device || device.pushProvider === "none" || device.pushToken === null) {
+        yield* outbox.markDead(item.deliveryId, nextAttempt, "device is no longer push-capable");
+        return;
+      }
+
+      const result = yield* Effect.exit(
+        sendToGateway(gateway, item.deliveryId, nextAttempt, device, item.notification),
       );
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("mobile push delivery job failed", {
-          cause,
-        }),
-      ),
-    );
+      if (result._tag === "Success") {
+        yield* outbox.markDelivered(item.deliveryId, new Date().toISOString());
+        return;
+      }
+
+      const failure = errorSummary(result.cause);
+      if (nextAttempt >= MAX_ATTEMPTS) {
+        yield* outbox.markDead(item.deliveryId, nextAttempt, failure);
+        yield* Effect.logWarning("mobile push delivery moved to dead letter", {
+          deliveryId: item.deliveryId,
+          deviceId: item.deviceId,
+          provider: device.pushProvider,
+          attempt: nextAttempt,
+          error: failure,
+        });
+        return;
+      }
+
+      const nextAttemptAt = new Date(Date.now() + retryDelayMs(nextAttempt)).toISOString();
+      yield* outbox.markRetry(item.deliveryId, nextAttempt, nextAttemptAt, failure);
+      yield* Effect.logWarning("mobile push delivery scheduled for retry", {
+        deliveryId: item.deliveryId,
+        deviceId: item.deviceId,
+        provider: device.pushProvider,
+        attempt: nextAttempt,
+        nextAttemptAt,
+        error: failure,
+      });
+    });
+
+  const processDue = Effect.gen(function* () {
+    if (!gateway) return;
+    const due = yield* outbox.listDue(new Date().toISOString(), DELIVERY_BATCH_SIZE);
+    yield* Effect.forEach(due, deliverOne, { concurrency: 4, discard: true });
+  }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("mobile push outbox sweep failed", {
+        cause,
+      }),
+    ),
+  );
 
   yield* Effect.forkScoped(
-    Effect.forever(Queue.take(queue).pipe(Effect.flatMap(deliverJob))),
+    Effect.forever(
+      processDue.pipe(
+        Effect.flatMap(() => sleep(DELIVERY_POLL_INTERVAL_MS)),
+      ),
+    ),
   );
 
   const enqueue: PushDeliveryShape["enqueue"] = (notification, targetDeviceId) =>
-    Queue.offer(queue, {
-      notification,
-      targetDeviceId: targetDeviceId ?? null,
-    }).pipe(Effect.asVoid);
+    persistNotification(notification, targetDeviceId).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("failed to persist mobile push notification", {
+          cause,
+          targetDeviceId: targetDeviceId ?? null,
+        }),
+      ),
+    );
 
   const getStatus: PushDeliveryShape["getStatus"] = () =>
     registry.list().pipe(
@@ -151,17 +224,19 @@ const makePushDelivery = Effect.gen(function* () {
       if (!device || device.pushProvider === "none" || device.pushToken === null) {
         return false;
       }
-      yield* enqueue(
-        {
-          kind: "info",
-          threadId: null,
-          title: "CodeForge push test",
-          body: "Background push delivery is configured for this device.",
-          createdAt: new Date().toISOString(),
-        },
-        deviceId,
+      const persisted = yield* Effect.exit(
+        persistNotification(
+          {
+            kind: "info",
+            threadId: null,
+            title: "CodeForge push test",
+            body: "Background push delivery is configured for this device.",
+            createdAt: new Date().toISOString(),
+          },
+          deviceId,
+        ),
       );
-      return true;
+      return persisted._tag === "Success";
     });
 
   return { enqueue, getStatus, sendTest } satisfies PushDeliveryShape;
